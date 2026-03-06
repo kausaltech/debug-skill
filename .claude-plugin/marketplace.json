@@ -1,0 +1,14 @@
+{
+  "name": "debug-skill-marketplace",
+  "owner": {
+    "name": "Almog Baku"
+  },
+  "plugins": [
+    {
+      "name": "debugging-code",
+      "description": "Interactively debug source code — set breakpoints, step through execution, inspect live variables, evaluate expressions, and trace root causes.",
+      "source": "./",
+      "skills": ["./skills/debugging-code"]
+    }
+  ]
+}
