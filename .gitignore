@@ -1,0 +1,18 @@
+# Build output
+/dap
+
+# Go test binaries and coverage
+*.test
+coverage.out
+
+# Test artifacts
+testdata/go/__debug_bin*
+testdata/rust/*.out
+
+# IDE
+.idea/
+.serena/
+
+# OS
+.DS_Store
+Thumbs.db
