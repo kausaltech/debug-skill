@@ -17,11 +17,52 @@ var globalFlags struct {
 }
 
 // NewRootCmd creates the cobra root command with all subcommands.
-func NewRootCmd() *cobra.Command {
+func NewRootCmd(version string) *cobra.Command {
 	root := &cobra.Command{
-		Use:   "dap",
-		Short: "CLI debugger for AI agents",
-		Long:  "A CLI debugging tool that wraps the Debug Adapter Protocol (DAP) for use by AI coding agents.",
+		Use:     "dap",
+		Version: version,
+		Short:   "Synchronous non-interactive CLI debugger via DAP",
+		Long: `dap is a CLI tool for running debuggers via the Debug Adapter Protocol (DAP).
+It is designed for agents but not limited to them.
+
+Supported languages (auto-detected from file extension):
+  .py              → debugpy   (Python)
+  .go              → dlv       (Go)
+  .js / .ts        → js-debug  (Node.js / TypeScript)
+  .rs / .c / .cpp  → lldb-dap  (Rust / C / C++)
+
+Key concept — auto-context: every execution command (debug, continue, step)
+blocks until the program stops, then returns:
+  - current location (file, line, function)
+  - surrounding source lines  (current line marked with ">")
+  - local variables with types and values
+  - call stack
+  - stdout/stderr output since last stop
+No separate inspection calls needed.
+
+When the program exits instead of stopping, output is:
+  Program terminated
+  Exit code: <n>
+
+Daemon: started automatically on first 'dap debug', killed by 'dap stop'.
+Sockets live at ~/.dap-cli/<session>.sock.
+
+Typical workflow:
+  dap debug app.py --break app.py:42   # start, stop at breakpoint → auto-context
+  dap eval "my_var"                    # inspect a value mid-session
+  dap step                             # step over → auto-context
+  dap continue                         # run to next breakpoint → auto-context
+  dap stop                             # kill session
+
+Best practices:
+  - Always run 'dap stop' when done to release the daemon.
+  - Use --session <name> to run multiple independent debug sessions in parallel.
+  - Prefer --break over --stop-on-entry: land exactly where you need.
+  - Use --json for machine-readable output; key fields: location, source,
+    locals, stack, output, exit_code, reason.`,
+		Example: `  dap debug app.py --break app.py:42
+  dap debug main.go --break main.go:8
+  dap debug --attach localhost:5678 --backend debugpy`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
@@ -73,7 +114,23 @@ func newDebugCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "debug <script> [flags]",
 		Short: "Start a debug session",
-		Args:  cobra.MaximumNArgs(1),
+		Long: `Start a debug session. Auto-starts the daemon if not already running.
+
+Backend is auto-detected from the script extension. Override with --backend.
+Use --break to set initial breakpoints. Use --stop-on-entry to stop at the first line.
+Use -- to pass arguments to the debugged program.
+Use --attach to connect to an already-running remote DAP server (skips local spawn,
+requires --backend).
+
+Blocks until the program hits a breakpoint or exits, then returns auto-context.`,
+		Example: `  dap debug app.py --break app.py:42
+  dap debug app.py --break app.py:10 --break app.py:20
+  dap debug main.go --break main.go:8
+  dap debug server.js --break server.js:15
+  dap debug hello.rs --stop-on-entry
+  dap debug app.py -- --config prod.yaml --verbose
+  dap debug --attach localhost:5678 --backend debugpy --break handler.py:15`,
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 && attach == "" {
 				return fmt.Errorf("script path or --attach required")
@@ -127,6 +184,10 @@ func newStopCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "stop",
 		Short: "End the debug session and kill the daemon",
+		Long: `End the debug session. Kills the debug adapter and daemon.
+Safe to call even if no session is active.`,
+		Example: `  dap stop
+  dap stop --session agent1`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			resp, err := SendCommand(globalFlags.socketPath, &Request{Command: "stop"})
 			if err != nil {
@@ -147,7 +208,17 @@ func newStepCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "step [in|out|over]",
 		Short: "Step through code (default: over)",
-		Args:  cobra.MaximumNArgs(1),
+		Long: `Step through code. Blocks until stopped, then returns auto-context
+(location, source, locals, stack, output).
+
+Modes:
+  over  step over function calls (default)
+  in    step into the next function call
+  out   step out of the current function`,
+		Example: `  dap step           # step over (default)
+  dap step in        # step into function
+  dap step out       # step out of function`,
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			mode := "over"
 			if len(args) > 0 {
@@ -173,6 +244,10 @@ func newContinueCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "continue",
 		Short: "Resume execution until next breakpoint or exit",
+		Long: `Resume execution until the next breakpoint or program exit.
+Blocks until stopped, then returns auto-context.
+If the program exits, prints "Program terminated" and the exit code.`,
+		Example: `  dap continue`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			resp, err := SendCommand(globalFlags.socketPath, &Request{Command: "continue"})
 			if err != nil {
@@ -194,6 +269,11 @@ func newContextCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "context",
 		Short: "Re-fetch full context without stepping",
+		Long: `Re-fetch the current auto-context without stepping: location, source snippet,
+local variables, call stack, and buffered output since last stop.
+Use --frame to inspect a different stack frame (0 = innermost, default).`,
+		Example: `  dap context
+  dap context --frame 2   # inspect caller's frame`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			rawArgs, _ := json.Marshal(ContextArgs{Frame: frame})
 			resp, err := SendCommand(globalFlags.socketPath, &Request{Command: "context", Args: rawArgs})
@@ -217,7 +297,12 @@ func newEvalCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "eval <expression>",
 		Short: "Evaluate an expression",
-		Args:  cobra.ExactArgs(1),
+		Long: `Evaluate an expression in the current (or specified) stack frame.
+Use --frame to evaluate in a parent frame's scope.`,
+		Example: `  dap eval "len(items)"
+  dap eval "x + y"
+  dap eval "self.config" --frame 1`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			rawArgs, _ := json.Marshal(EvalArgs{Expression: args[0], Frame: frame})
 			resp, err := SendCommand(globalFlags.socketPath, &Request{Command: "eval", Args: rawArgs})
@@ -239,6 +324,10 @@ func newOutputCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "output",
 		Short: "Drain and print buffered program output (stdout/stderr) since last stop",
+		Long: `Drain and print buffered stdout/stderr since the last stop. Clears the buffer.
+Use when the program is running (between 'continue' and next breakpoint), or to
+check output without re-fetching full context.`,
+		Example: `  dap output`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			resp, err := SendCommand(globalFlags.socketPath, &Request{Command: "output"})
 			if err != nil {
