@@ -3,8 +3,8 @@
 </p>
 
 <p align="center">
-  <strong>Give your AI agent a real debugger.</strong><br>
-  Breakpoints. Stepping. Variable inspection. Stack traces. All from Bash.
+  <strong>Let your coding agent debug like a human developer.</strong><br>
+  Set breakpoints, step through code, evaluate expressions — the way you actually debug.
 </p>
 <p align="center">
   <a href="https://github.com/AlmogBaku/debug-skill/releases/latest"><img src="https://img.shields.io/github/v/release/AlmogBaku/debug-skill?style=flat-square&color=00c853" alt="Latest Release"></a>
@@ -20,14 +20,19 @@
 
 ---
 
-AI coding agents can't use interactive debuggers — they're stuck with `print` statements and guesswork. **debug-skill**
-fixes that. It ships two things:
+AI coding agents (Claude Code, Codex, Opencode, Cursor) are stuck with `print` statements and guesswork. **debug-skill** gives them what human developers have: a real debugger they can actually use. It ships two things:
 
 - **A Claude Code skill** — teaches Claude *how* to debug: when to set breakpoints, how to step through code, how to
   inspect state
 - **The `dap` CLI** — a stateless CLI wrapper around
   the [Debug Adapter Protocol](https://microsoft.github.io/debug-adapter-protocol/) so any agent can drive a real
   debugger from Bash
+
+---
+
+## Demo
+
+[![Watch the demo](https://img.youtube.com/vi/ZxXvTtilZr0/maxresdefault.jpg)](https://youtu.be/ZxXvTtilZr0)
 
 ---
 
