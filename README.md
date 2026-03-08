@@ -32,7 +32,7 @@ AI coding agents (Claude Code, Codex, Opencode, Cursor) are stuck with `print` s
 
 ## Demo
 
-[![Watch the demo](https://img.youtube.com/vi/ZxXvTtilZr0/maxresdefault.jpg)](https://youtu.be/ZxXvTtilZr0)
+[![Watch the demo](.github/demo.gif)](https://youtu.be/ZxXvTtilZr0)
 
 ---
 
