@@ -44,7 +44,7 @@ func TestHandleOutput(t *testing.T) {
 	d.appendOutput("hello\n")
 	d.appendOutput("world\n")
 
-	resp := d.handleOutput()
+	resp := d.handleOutput(nil)
 
 	if resp.Status != "ok" {
 		t.Fatalf("expected status ok, got %q", resp.Status)
@@ -91,68 +91,84 @@ func TestMergeBreakpoints(t *testing.T) {
 		existing []string
 		add      []string
 		remove   []string
-		wantLen  int
+		want     []string
 	}{
 		{
 			name:     "add to empty",
 			existing: nil,
 			add:      []string{"/app.py:10", "/app.py:20"},
-			wantLen:  2,
+			want:     []string{"/app.py:10", "/app.py:20"},
 		},
 		{
 			name:     "additive merge",
 			existing: []string{"/app.py:10"},
 			add:      []string{"/app.py:20"},
-			wantLen:  2,
+			want:     []string{"/app.py:10", "/app.py:20"},
 		},
 		{
 			name:     "deduplicate",
 			existing: []string{"/app.py:10"},
 			add:      []string{"/app.py:10"},
-			wantLen:  1,
+			want:     []string{"/app.py:10"},
 		},
 		{
 			name:     "remove existing",
 			existing: []string{"/app.py:10", "/app.py:20"},
 			remove:   []string{"/app.py:10"},
-			wantLen:  1,
+			want:     []string{"/app.py:20"},
 		},
 		{
-			name:     "add and remove",
+			name:     "add and remove different",
 			existing: []string{"/app.py:10"},
 			add:      []string{"/app.py:30"},
 			remove:   []string{"/app.py:10"},
-			wantLen:  1,
+			want:     []string{"/app.py:30"},
 		},
 		{
 			name:     "remove nonexistent is no-op",
 			existing: []string{"/app.py:10"},
 			remove:   []string{"/app.py:99"},
-			wantLen:  1,
+			want:     []string{"/app.py:10"},
+		},
+		{
+			name:     "empty inputs",
+			existing: nil,
+			add:      nil,
+			remove:   nil,
+			want:     []string{},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// We can't call updateBreakpoints without a client, but we can
-			// verify the merge logic by replicating it. Instead, test via
-			// sessionBreaks state tracking using a mock-friendly approach.
-			// Build expected merged set using the same algorithm as updateBreakpoints.
-			removeSet := make(map[string]bool)
-			for _, b := range tt.remove {
-				removeSet[b] = true
+			got := mergeBreakpoints(tt.existing, tt.add, tt.remove)
+			if len(got) != len(tt.want) {
+				t.Fatalf("expected %d breakpoints %v, got %d: %v", len(tt.want), tt.want, len(got), got)
 			}
-			merged := make(map[string]bool)
-			for _, b := range tt.existing {
-				if !removeSet[b] {
-					merged[b] = true
+			for i, w := range tt.want {
+				if got[i] != w {
+					t.Errorf("breakpoint[%d] = %q, want %q", i, got[i], w)
 				}
 			}
-			for _, b := range tt.add {
-				merged[b] = true
-			}
-			if len(merged) != tt.wantLen {
-				t.Errorf("expected %d breakpoints, got %d: %v", tt.wantLen, len(merged), merged)
+		})
+	}
+}
+
+func TestNormalizeBreakpoint(t *testing.T) {
+	tests := []struct {
+		name    string
+		spec    string
+		wantErr bool
+	}{
+		{name: "valid", spec: "/app.py:10"},
+		{name: "no colon", spec: "app.py", wantErr: true},
+		{name: "non-numeric line", spec: "/app.py:abc", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := normalizeBreakpoint(tt.spec)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("normalizeBreakpoint(%q) error = %v, wantErr %v", tt.spec, err, tt.wantErr)
 			}
 		})
 	}

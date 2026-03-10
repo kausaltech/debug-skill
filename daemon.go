@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -297,7 +298,15 @@ func (d *Daemon) dispatch(req Request) *Response {
 	case "eval":
 		return d.handleEval(req.Args)
 	case "output":
-		return d.handleOutput()
+		return d.handleOutput(req.Args)
+	case "break_list":
+		return d.handleBreakList()
+	case "break_add":
+		return d.handleBreakAdd(req.Args)
+	case "break_remove":
+		return d.handleBreakRemove(req.Args)
+	case "break_clear":
+		return d.handleBreakClear()
 	case "stop":
 		return d.handleStop()
 	case "ping":
@@ -472,6 +481,26 @@ func (d *Daemon) handleDebug(rawArgs json.RawMessage) *Response {
 	}
 }
 
+// applyBreakpointUpdates processes breakpoint add/remove/exception filter changes.
+// Returns nil on success, error *Response on failure.
+func (d *Daemon) applyBreakpointUpdates(bu BreakpointUpdates) *Response {
+	if len(bu.Breaks) > 0 || len(bu.RemoveBreaks) > 0 {
+		if err := d.updateBreakpoints(bu.Breaks, bu.RemoveBreaks); err != nil {
+			return &Response{Status: "error", Error: fmt.Sprintf("set breakpoints: %v", err)}
+		}
+	}
+	// ExceptionFilters on inline commands (--break-on-exception) replaces all current filters,
+	// unlike handleBreakAdd which merges additively. This matches the CLI flag semantics
+	// documented in the API: "replaces current filters".
+	if bu.ExceptionFilters != nil {
+		d.sessionExceptionFilters = bu.ExceptionFilters
+		if err := d.client.SetExceptionBreakpointsRequest(bu.ExceptionFilters); err != nil {
+			return &Response{Status: "error", Error: fmt.Sprintf("set exception breakpoints: %v", err)}
+		}
+	}
+	return nil
+}
+
 func (d *Daemon) handleStep(rawArgs json.RawMessage) *Response {
 	if d.client == nil {
 		return &Response{Status: "error", Error: "no active debug session (program may have terminated) — run 'dap debug' to start a new session"}
@@ -483,6 +512,10 @@ func (d *Daemon) handleStep(rawArgs json.RawMessage) *Response {
 	}
 	if args.Mode == "" {
 		args.Mode = "over"
+	}
+
+	if errResp := d.applyBreakpointUpdates(args.BreakpointUpdates); errResp != nil {
+		return errResp
 	}
 
 	threadID := resolveThreadID(d.threadID)
@@ -517,19 +550,8 @@ func (d *Daemon) handleContinue(rawArgs json.RawMessage) *Response {
 		_ = json.Unmarshal(rawArgs, &args)
 	}
 
-	// Update breakpoints if requested
-	if len(args.Breaks) > 0 || len(args.RemoveBreaks) > 0 {
-		if err := d.updateBreakpoints(args.Breaks, args.RemoveBreaks); err != nil {
-			return &Response{Status: "error", Error: fmt.Sprintf("set breakpoints: %v", err)}
-		}
-	}
-
-	// Update exception filters if requested (replaces all)
-	if args.ExceptionFilters != nil {
-		d.sessionExceptionFilters = args.ExceptionFilters
-		if err := d.client.SetExceptionBreakpointsRequest(args.ExceptionFilters); err != nil {
-			return &Response{Status: "error", Error: fmt.Sprintf("set exception breakpoints: %v", err)}
-		}
+	if errResp := d.applyBreakpointUpdates(args.BreakpointUpdates); errResp != nil {
+		return errResp
 	}
 
 	threadID := resolveThreadID(d.threadID)
@@ -551,6 +573,10 @@ func (d *Daemon) handleContext(rawArgs json.RawMessage) *Response {
 		_ = json.Unmarshal(rawArgs, &args)
 	}
 
+	if errResp := d.applyBreakpointUpdates(args.BreakpointUpdates); errResp != nil {
+		return errResp
+	}
+
 	threadID := resolveThreadID(d.threadID)
 
 	ctx, err := getFullContext(d, threadID, args.Frame)
@@ -568,6 +594,10 @@ func (d *Daemon) handleEval(rawArgs json.RawMessage) *Response {
 	var args EvalArgs
 	if err := json.Unmarshal(rawArgs, &args); err != nil {
 		return &Response{Status: "error", Error: fmt.Sprintf("invalid args: %v", err)}
+	}
+
+	if errResp := d.applyBreakpointUpdates(args.BreakpointUpdates); errResp != nil {
+		return errResp
 	}
 
 	frameID := args.Frame
@@ -609,11 +639,144 @@ func (d *Daemon) handleEval(rawArgs json.RawMessage) *Response {
 	}
 }
 
-func (d *Daemon) handleOutput() *Response {
+func (d *Daemon) handleOutput(rawArgs json.RawMessage) *Response {
+	if d.client != nil {
+		var args OutputArgs
+		if rawArgs != nil {
+			_ = json.Unmarshal(rawArgs, &args)
+		}
+		if errResp := d.applyBreakpointUpdates(args.BreakpointUpdates); errResp != nil {
+			return errResp
+		}
+	}
+
 	d.mu.Lock()
 	output := d.outputString()
 	d.mu.Unlock()
 	return &Response{Status: "ok", Data: &ContextResult{Output: output}}
+}
+
+func (d *Daemon) handleBreakList() *Response {
+	if d.client == nil {
+		return &Response{Status: "error", Error: "no active debug session (program may have terminated) — run 'dap debug' to start a new session"}
+	}
+	breaks := make([]string, len(d.sessionBreaks))
+	copy(breaks, d.sessionBreaks)
+	sort.Strings(breaks)
+	filters := make([]string, len(d.sessionExceptionFilters))
+	copy(filters, d.sessionExceptionFilters)
+	sort.Strings(filters)
+	return &Response{Status: "ok", Data: &ContextResult{Breakpoints: breaks, ExceptionFilters: filters, IsBreakList: true}}
+}
+
+func (d *Daemon) handleBreakAdd(rawArgs json.RawMessage) *Response {
+	if d.client == nil {
+		return &Response{Status: "error", Error: "no active debug session (program may have terminated) — run 'dap debug' to start a new session"}
+	}
+
+	var args BreakAddArgs
+	if err := json.Unmarshal(rawArgs, &args); err != nil {
+		return &Response{Status: "error", Error: fmt.Sprintf("invalid args: %v", err)}
+	}
+
+	if len(args.Breaks) > 0 {
+		if err := d.updateBreakpoints(args.Breaks, nil); err != nil {
+			return &Response{Status: "error", Error: fmt.Sprintf("set breakpoints: %v", err)}
+		}
+	}
+
+	if len(args.ExceptionFilters) > 0 {
+		// Additive: merge with existing
+		existing := make(map[string]bool)
+		for _, f := range d.sessionExceptionFilters {
+			existing[f] = true
+		}
+		for _, f := range args.ExceptionFilters {
+			existing[f] = true
+		}
+		merged := make([]string, 0, len(existing))
+		for f := range existing {
+			merged = append(merged, f)
+		}
+		sort.Strings(merged)
+		d.sessionExceptionFilters = merged
+		if err := d.client.SetExceptionBreakpointsRequest(merged); err != nil {
+			return &Response{Status: "error", Error: fmt.Sprintf("set exception breakpoints: %v", err)}
+		}
+	}
+
+	return &Response{Status: "ok"}
+}
+
+func (d *Daemon) handleBreakRemove(rawArgs json.RawMessage) *Response {
+	if d.client == nil {
+		return &Response{Status: "error", Error: "no active debug session (program may have terminated) — run 'dap debug' to start a new session"}
+	}
+
+	var args BreakRemoveArgs
+	if err := json.Unmarshal(rawArgs, &args); err != nil {
+		return &Response{Status: "error", Error: fmt.Sprintf("invalid args: %v", err)}
+	}
+
+	if len(args.Breaks) > 0 {
+		if err := d.updateBreakpoints(nil, args.Breaks); err != nil {
+			return &Response{Status: "error", Error: fmt.Sprintf("remove breakpoints: %v", err)}
+		}
+	}
+
+	if len(args.ExceptionFilters) > 0 {
+		removeSet := make(map[string]bool)
+		for _, f := range args.ExceptionFilters {
+			removeSet[f] = true
+		}
+		var remaining []string
+		for _, f := range d.sessionExceptionFilters {
+			if !removeSet[f] {
+				remaining = append(remaining, f)
+			}
+		}
+		d.sessionExceptionFilters = remaining
+		filters := remaining
+		if filters == nil {
+			filters = []string{}
+		}
+		if err := d.client.SetExceptionBreakpointsRequest(filters); err != nil {
+			return &Response{Status: "error", Error: fmt.Sprintf("set exception breakpoints: %v", err)}
+		}
+	}
+
+	return &Response{Status: "ok"}
+}
+
+func (d *Daemon) handleBreakClear() *Response {
+	if d.client == nil {
+		return &Response{Status: "error", Error: "no active debug session (program may have terminated) — run 'dap debug' to start a new session"}
+	}
+
+	// Clear all file breakpoints by sending empty sets for each affected file
+	affectedFiles := make(map[string]bool)
+	for _, b := range d.sessionBreaks {
+		n, err := normalizeBreakpoint(b)
+		if err != nil {
+			continue
+		}
+		parts := strings.SplitN(n, ":", 2)
+		affectedFiles[parts[0]] = true
+	}
+	for file := range affectedFiles {
+		if err := d.client.SetBreakpointsRequest(file, nil); err != nil {
+			return &Response{Status: "error", Error: fmt.Sprintf("clear breakpoints: %v", err)}
+		}
+	}
+	d.sessionBreaks = nil
+
+	// Clear exception filters
+	d.sessionExceptionFilters = nil
+	if err := d.client.SetExceptionBreakpointsRequest([]string{}); err != nil {
+		return &Response{Status: "error", Error: fmt.Sprintf("clear exception breakpoints: %v", err)}
+	}
+
+	return &Response{Status: "ok"}
 }
 
 func (d *Daemon) handleStop() *Response {
@@ -779,56 +942,82 @@ func (d *Daemon) awaitStopResult() *Response {
 
 // --- Helpers ---
 
-// updateBreakpoints merges new breakpoints with existing session breakpoints,
-// removes specified breakpoints, and sends SetBreakpointsRequest per file.
-func (d *Daemon) updateBreakpoints(add, remove []string) error {
-	// Build set of breakpoints to remove for fast lookup
+// normalizeBreakpoint normalizes "file:line" to absolute path form.
+// Returns error if format is invalid (no ":" separator or non-numeric line).
+func normalizeBreakpoint(spec string) (string, error) {
+	parts := strings.SplitN(spec, ":", 2)
+	if len(parts) != 2 {
+		return "", fmt.Errorf("invalid breakpoint spec %q: expected file:line", spec)
+	}
+	if _, err := strconv.Atoi(parts[1]); err != nil {
+		return "", fmt.Errorf("invalid breakpoint spec %q: line must be a number", spec)
+	}
+	file := parts[0]
+	if abs, err := filepath.Abs(file); err == nil {
+		file = abs
+	}
+	return file + ":" + parts[1], nil
+}
+
+// mergeBreakpoints merges add into existing, removes remove, returns updated sorted list.
+// All inputs must be normalized (absolute paths).
+func mergeBreakpoints(existing, add, remove []string) []string {
 	removeSet := make(map[string]bool, len(remove))
 	for _, b := range remove {
-		// Normalize: resolve to absolute path
-		parts := strings.SplitN(b, ":", 2)
-		if len(parts) == 2 {
-			file := parts[0]
-			if abs, err := filepath.Abs(file); err == nil {
-				file = abs
-			}
-			removeSet[file+":"+parts[1]] = true
-		}
+		removeSet[b] = true
 	}
 
-	// Start with existing breakpoints, filter out removals
 	merged := make(map[string]bool)
-	for _, b := range d.sessionBreaks {
-		parts := strings.SplitN(b, ":", 2)
-		if len(parts) == 2 {
-			file := parts[0]
-			if abs, err := filepath.Abs(file); err == nil {
-				file = abs
-			}
-			key := file + ":" + parts[1]
-			if !removeSet[key] {
-				merged[key] = true
-			}
+	for _, b := range existing {
+		if !removeSet[b] {
+			merged[b] = true
 		}
 	}
-
-	// Add new breakpoints
 	for _, b := range add {
-		parts := strings.SplitN(b, ":", 2)
-		if len(parts) == 2 {
-			file := parts[0]
-			if abs, err := filepath.Abs(file); err == nil {
-				file = abs
-			}
-			merged[file+":"+parts[1]] = true
-		}
+		merged[b] = true
 	}
 
-	// Convert back to slice
-	var updated []string
+	updated := make([]string, 0, len(merged))
 	for b := range merged {
 		updated = append(updated, b)
 	}
+	sort.Strings(updated)
+	return updated
+}
+
+// updateBreakpoints normalizes inputs, validates, merges breakpoints, and sends
+// SetBreakpointsRequest per affected file.
+func (d *Daemon) updateBreakpoints(add, remove []string) error {
+	// Normalize all inputs
+	normalizedAdd := make([]string, 0, len(add))
+	for _, b := range add {
+		n, err := normalizeBreakpoint(b)
+		if err != nil {
+			return err
+		}
+		normalizedAdd = append(normalizedAdd, n)
+	}
+	normalizedRemove := make([]string, 0, len(remove))
+	for _, b := range remove {
+		n, err := normalizeBreakpoint(b)
+		if err != nil {
+			return err
+		}
+		normalizedRemove = append(normalizedRemove, n)
+	}
+
+	// Check for overlap: same breakpoint in both --break and --remove-break
+	removeSet := make(map[string]bool, len(normalizedRemove))
+	for _, b := range normalizedRemove {
+		removeSet[b] = true
+	}
+	for _, a := range normalizedAdd {
+		if removeSet[a] {
+			return fmt.Errorf("breakpoint %s appears in both --break and --remove-break", a)
+		}
+	}
+
+	updated := mergeBreakpoints(d.sessionBreaks, normalizedAdd, normalizedRemove)
 	d.sessionBreaks = updated
 
 	// Collect all files that were affected (need to re-send breakpoints for each)
@@ -838,14 +1027,10 @@ func (d *Daemon) updateBreakpoints(add, remove []string) error {
 		affectedFiles[file] = true
 	}
 	// Also include files from removed breakpoints (may now have zero breakpoints)
-	for _, b := range remove {
+	for _, b := range normalizedRemove {
 		parts := strings.SplitN(b, ":", 2)
 		if len(parts) == 2 {
-			file := parts[0]
-			if abs, err := filepath.Abs(file); err == nil {
-				file = abs
-			}
-			affectedFiles[file] = true
+			affectedFiles[parts[0]] = true
 		}
 	}
 

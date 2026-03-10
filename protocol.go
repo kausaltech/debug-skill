@@ -30,6 +30,11 @@ type ContextResult struct {
 	Output     string       `json:"output,omitempty"`
 	ExitCode   *int         `json:"exit_code,omitempty"`
 	EvalResult *EvalResult  `json:"eval_result,omitempty"`
+
+	// Break list results
+	Breakpoints      []string `json:"breakpoints,omitempty"`
+	ExceptionFilters []string `json:"exception_filters,omitempty"`
+	IsBreakList      bool     `json:"is_break_list,omitempty"`
 }
 
 // Location identifies a position in source code.
@@ -70,6 +75,13 @@ type EvalResult struct {
 
 // --- IPC command args ---
 
+// BreakpointUpdates holds breakpoint modifications shared across commands.
+type BreakpointUpdates struct {
+	Breaks           []string `json:"breaks,omitempty"`            // "file:line" breakpoints to add (additive)
+	RemoveBreaks     []string `json:"remove_breaks,omitempty"`     // "file:line" breakpoints to remove
+	ExceptionFilters []string `json:"exception_filters,omitempty"` // backend-specific filter IDs (replaces current)
+}
+
 // DebugArgs are arguments for the "debug" command.
 type DebugArgs struct {
 	Script           string   `json:"script"`
@@ -84,24 +96,42 @@ type DebugArgs struct {
 // StepArgs are arguments for the "step" command.
 type StepArgs struct {
 	Mode string `json:"mode"` // "over", "in", "out"
+	BreakpointUpdates
 }
 
 // ContinueArgs are arguments for the "continue" command.
 type ContinueArgs struct {
-	Breaks           []string `json:"breaks,omitempty"`            // "file:line" breakpoints to add (additive)
-	RemoveBreaks     []string `json:"remove_breaks,omitempty"`     // "file:line" breakpoints to remove
-	ExceptionFilters []string `json:"exception_filters,omitempty"` // backend-specific filter IDs (replaces current)
+	BreakpointUpdates
 }
 
 // EvalArgs are arguments for the "eval" command.
 type EvalArgs struct {
 	Expression string `json:"expression"`
 	Frame      int    `json:"frame,omitempty"`
+	BreakpointUpdates
 }
 
 // ContextArgs are arguments for the "context" command.
 type ContextArgs struct {
 	Frame int `json:"frame,omitempty"`
+	BreakpointUpdates
+}
+
+// OutputArgs are arguments for the "output" command.
+type OutputArgs struct {
+	BreakpointUpdates
+}
+
+// BreakAddArgs are arguments for the "break_add" command.
+type BreakAddArgs struct {
+	Breaks           []string `json:"breaks,omitempty"`
+	ExceptionFilters []string `json:"exception_filters,omitempty"`
+}
+
+// BreakRemoveArgs are arguments for the "break_remove" command.
+type BreakRemoveArgs struct {
+	Breaks           []string `json:"breaks,omitempty"`
+	ExceptionFilters []string `json:"exception_filters,omitempty"`
 }
 
 // --- Length-prefixed JSON IPC ---

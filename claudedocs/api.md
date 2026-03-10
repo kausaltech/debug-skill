@@ -67,10 +67,16 @@ dap continue --break-on-exception raised # set exception breakpoints and continu
 
 Step through code. Default: `over`.
 
+**Flags:**
+- `--break <file:line>` — Add a breakpoint before stepping (repeatable)
+- `--remove-break <file:line>` — Remove a breakpoint before stepping (repeatable)
+- `--break-on-exception <filter>` — Set exception breakpoints before stepping (repeatable, replaces current)
+
 ```bash
 dap step           # step over (default)
 dap step in        # step into function
 dap step out       # step out of current function
+dap step --break app.py:42   # add breakpoint, then step
 ```
 
 ---
@@ -81,17 +87,30 @@ dap step out       # step out of current function
 
 Re-fetch full context without stepping. Same format as auto-context.
 
+**Flags:**
+- `--frame N` — Stack frame to inspect (0 = innermost, default)
+- `--break <file:line>` — Add a breakpoint (repeatable)
+- `--remove-break <file:line>` — Remove a breakpoint (repeatable)
+- `--break-on-exception <filter>` — Set exception breakpoints (repeatable, replaces current)
+
 ```bash
 dap context
 dap context --frame 2    # inspect a different stack frame
+dap context --break app.py:42   # add breakpoint and re-fetch context
 ```
 
 #### `dap output`
 
 Drain and print buffered program output (stdout/stderr) since the last stop. Clears the buffer.
 
+**Flags:**
+- `--break <file:line>` — Add a breakpoint (repeatable)
+- `--remove-break <file:line>` — Remove a breakpoint (repeatable)
+- `--break-on-exception <filter>` — Set exception breakpoints (repeatable, replaces current)
+
 ```bash
 dap output
+dap output --break app.py:42   # add breakpoint and drain output
 ```
 
 Useful when the program is running (e.g. between `continue` and the next breakpoint) or to fetch output without
@@ -103,10 +122,63 @@ re-fetching the full context.
 
 Evaluate an expression in the current (or specified) frame.
 
+**Flags:**
+- `--frame N` — Stack frame for evaluation context
+- `--break <file:line>` — Add a breakpoint (repeatable)
+- `--remove-break <file:line>` — Remove a breakpoint (repeatable)
+- `--break-on-exception <filter>` — Set exception breakpoints (repeatable, replaces current)
+
 ```bash
 dap eval "len(items)"
 dap eval "x + y"
 dap eval "self.config" --frame 1
+```
+
+---
+
+### Breakpoint Management
+
+#### `dap break list`
+
+List all breakpoints and exception filters in the current session.
+
+```bash
+dap break list
+dap break list --json
+```
+
+#### `dap break add <file:line> [file:line...]`
+
+Add one or more breakpoints or exception filters.
+
+**Flags:**
+- `--break-on-exception <filter>` — Add exception filter (repeatable)
+
+```bash
+dap break add app.py:42
+dap break add app.py:10 app.py:20
+dap break add --break-on-exception raised
+```
+
+#### `dap break remove <file:line> [file:line...]`
+
+Remove one or more breakpoints or exception filters. Alias: `dap break rm`.
+
+**Flags:**
+- `--break-on-exception <filter>` — Remove exception filter (repeatable)
+
+```bash
+dap break remove app.py:42
+dap break rm app.py:10 app.py:20
+dap break remove --break-on-exception raised
+```
+
+#### `dap break clear`
+
+Remove all breakpoints and exception filters.
+
+```bash
+dap break clear
 ```
 
 ---
