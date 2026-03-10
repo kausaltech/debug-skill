@@ -63,12 +63,19 @@ Not every bug needs a debugger: reach for the debugger you can't determine from 
 
 ## The Debugging Mindset
 
+Reading source code lets you reason about what *should* happen. A debugger lets you *observe* what *does* happen —
+actual values, actual path, actual state at each moment. When those diverge, you've found your bug. Default to
+observing, not guessing.
+
 You should reach to the debugger when reading the source code alone is not enough to understand the problem. This is a
 mind-shift from the usual "print-based debugging." That means that we fix once we VALIDATED the hypothesis and saw
 evidence to our theory.
 
 **Two strikes, rethink.** If two hypotheses fail at the same location, your mental model is wrong.
 Re-read the code, form a *completely different* theory with different breakpoints.
+
+**Escalate gradually.** Start with `dap eval` to test a quick hypothesis. Use conditional breakpoints to filter noise.
+Fall back to full breakpoints + stepping only when you need interactive control.
 
 ## Know Your State
 
@@ -78,6 +85,10 @@ output. At each stop, ask:
 - Do the local variables have the values I expected?
 - Is the call stack showing the code path I expected?
 - Does the output so far reveal anything unexpected?
+
+**Trace causation up the stack.** If a value is wrong at frame 0, check `dap eval "<expr>" --frame 1` to see what the
+caller passed. Keep going up (`--frame 2`, `--frame 3`) until you find the frame where the value first became wrong —
+that's the origin of the bug, not the symptom.
 
 Example output at a stop:
 
@@ -110,6 +121,14 @@ see starting strategies above.
 - Set where the problem *begins*, not where it *manifests*
 - Exception at line 80? Root cause is upstream — start earlier
 - Uncertain? Bisect: `--break f:20 --break f:60` — wrong state before or after halves the search space
+
+**Where to break:**
+
+- **Boundaries** — where data crosses a format, representation, or module boundary; state is cleanest here
+- **State transitions** — the line that assigns or mutates the corrupted value
+- **Wrong branch** — the condition whose inputs led to the bad path
+- **Anti-patterns** — don't break inside library code; break at the call site instead. Don't use unconditional breaks in
+  tight loops — use conditions.
 
 ### Managing Breakpoints Mid-Session
 
@@ -179,8 +198,7 @@ dap threads                      # list all threads
 dap thread <id>                  # switch thread context
 ```
 
-`step in` crosses file boundaries — execution follows the call into whatever module it lives in. Each stop shows the
-current `file:line` so you always know where you are.
+Each stop shows the current `file:line` so you always know where you are.
 
 Use `dap eval "<expr>"` to probe live state without stepping:
 
@@ -190,6 +208,9 @@ dap eval "user.profile.settings"
 dap eval "expected == actual"       # test hypothesis on live state
 dap eval "self.config" --frame 1    # frame 1 = caller (may be a different file)
 ```
+
+Avoid eval expressions that call methods with side effects — they mutate program state and can corrupt your debugging
+session. Stick to read-only access unless you're intentionally testing a fix.
 
 ## When the Program Hangs
 
@@ -211,8 +232,7 @@ other (deadlock)? The location where `pause` stops is your first clue.
 
 ## Digging Into Complex State
 
-When a variable is opaque (`data=<MyClass object>`) or deeply nested, don't guess its structure — expand
-it. `dap inspect data --depth 2` recursively shows fields.
+When a variable is opaque or deeply nested, expand it: `dap inspect data --depth 2`.
 
 ## Skipping Ahead
 
@@ -225,8 +245,9 @@ When you need a quick look at a specific line without committing to a permanent 
 If state is wrong but the code path looks correct, consider: is another thread modifying state
 concurrently?
 
-- List threads (`dap threads`) to see what else is running. Switch context (`dap thread <id>`) to
-  suspicious threads.
+**First move at any concurrent crash or hang:** run `dap threads`, then inspect every thread's stack with
+`dap thread <id>` — the thread causing the problem is often not the one currently stopped.
+
 - **Deadlock pattern**: two or more threads each waiting for a resource the other holds. Check thread
   states to confirm.
 - **Race condition**: unexpected values that change between stops. Look for shared mutable state
