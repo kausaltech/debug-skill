@@ -174,8 +174,9 @@ Hypothesis: result not assigned before return
 
 New hypothesis: caller passing empty list
 → dap eval "items" --frame 1      → []   ← confirmed
+→ dap step out                    → caller at line 10, no guard for empty input
 → dap continue --break script.py:8 --remove-break script.py:41
-  ← add breakpoint at caller, remove the one we're done with
+  ← narrowing: add breakpoint at data source, drop the one we're done with
   Stopped at main():8, items loaded from config as []
 
 Root cause: missing guard. Fix → dap stop.
