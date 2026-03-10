@@ -48,3 +48,9 @@ jobs:
           git fetch origin master
           git rebase origin/master
           git push
+
+      - name: Tag the release
+        if: steps.tag.outputs.new_version != ''
+        run: |
+          git tag "v${{ steps.tag.outputs.new_version }}"
+          git push origin "v${{ steps.tag.outputs.new_version }}"
