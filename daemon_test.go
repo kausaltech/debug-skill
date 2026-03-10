@@ -88,12 +88,12 @@ func TestTempBinaryCleanup_NilSafe(t *testing.T) {
 
 func TestParseBreakpointSpec(t *testing.T) {
 	tests := []struct {
-		name      string
-		spec      string
-		wantFile  string // suffix check (absolute paths vary)
-		wantLine  int
-		wantCond  string
-		wantErr   bool
+		name     string
+		spec     string
+		wantFile string // suffix check (absolute paths vary)
+		wantLine int
+		wantCond string
+		wantErr  bool
 	}{
 		{
 			name:     "file:line",

@@ -63,7 +63,7 @@ type Daemon struct {
 	cleanupFn func()
 
 	// Adapter address and config for child session creation (js-debug multi-session)
-	adapterAddr             string
+	adapterAddr string
 	// sessionBreaks and sessionExceptionFilters are only accessed from handler methods
 	// (single-threaded dispatch via Serve) — no mutex needed.
 	sessionBreaks           []Breakpoint // stored breakpoints for child session re-init
