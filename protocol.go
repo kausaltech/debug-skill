@@ -40,19 +40,32 @@ type Response struct {
 	Data   *ContextResult `json:"data,omitempty"`
 }
 
+// ExceptionInfo holds details about an exception that caused a stop.
+type ExceptionInfo struct {
+	ExceptionID string `json:"exception_id"`
+	Description string `json:"description,omitempty"`
+	Details     string `json:"details,omitempty"`
+}
+
 // ContextResult holds the auto-context returned by execution commands.
 type ContextResult struct {
-	Reason     string       `json:"reason,omitempty"`
-	Location   *Location    `json:"location,omitempty"`
-	Source     []SourceLine `json:"source,omitempty"`
-	Locals     []Variable   `json:"locals,omitempty"`
-	Stack      []StackFrame `json:"stack,omitempty"`
-	Output     string       `json:"output,omitempty"`
-	ExitCode   *int         `json:"exit_code,omitempty"`
-	EvalResult *EvalResult  `json:"eval_result,omitempty"`
+	Reason        string         `json:"reason,omitempty"`
+	Location      *Location      `json:"location,omitempty"`
+	Source        []SourceLine   `json:"source,omitempty"`
+	Locals        []Variable     `json:"locals,omitempty"`
+	Stack         []StackFrame   `json:"stack,omitempty"`
+	Output        string         `json:"output,omitempty"`
+	ExitCode      *int           `json:"exit_code,omitempty"`
+	EvalResult    *EvalResult    `json:"eval_result,omitempty"`
+	ExceptionInfo *ExceptionInfo `json:"exception_info,omitempty"`
+	InspectResult *InspectResult `json:"inspect_result,omitempty"`
 
 	// Warnings from unverified breakpoints (drained on each response)
 	Warnings []string `json:"warnings,omitempty"`
+
+	// Thread list results
+	Threads      []ThreadInfo `json:"threads,omitempty"`
+	IsThreadList bool         `json:"is_thread_list,omitempty"`
 
 	// Break list results
 	Breakpoints      []Breakpoint `json:"breakpoints,omitempty"`
@@ -112,18 +125,28 @@ type DebugArgs struct {
 	Breaks           []Breakpoint `json:"breaks,omitempty"`
 	StopOnEntry      bool         `json:"stop_on_entry,omitempty"`
 	Attach           string       `json:"attach,omitempty"` // "host:port" for remote
+	PID              int          `json:"pid,omitempty"`    // PID for local attach
 	ProgramArgs      []string     `json:"program_args,omitempty"`
 	ExceptionFilters []string     `json:"exception_filters,omitempty"` // backend-specific filter IDs
+	ContextLines     int          `json:"context_lines,omitempty"`
 }
 
 // StepArgs are arguments for the "step" command.
 type StepArgs struct {
-	Mode string `json:"mode"` // "over", "in", "out"
+	Mode         string `json:"mode"` // "over", "in", "out"
+	ContextLines int    `json:"context_lines,omitempty"`
+	BreakpointUpdates
+}
+
+// PauseArgs are arguments for the "pause" command.
+type PauseArgs struct {
 	BreakpointUpdates
 }
 
 // ContinueArgs are arguments for the "continue" command.
 type ContinueArgs struct {
+	ContinueTo   *Breakpoint `json:"continue_to,omitempty"`
+	ContextLines int         `json:"context_lines,omitempty"`
 	BreakpointUpdates
 }
 
@@ -136,13 +159,42 @@ type EvalArgs struct {
 
 // ContextArgs are arguments for the "context" command.
 type ContextArgs struct {
-	Frame int `json:"frame,omitempty"`
+	Frame        int `json:"frame,omitempty"`
+	ContextLines int `json:"context_lines,omitempty"`
 	BreakpointUpdates
 }
 
 // OutputArgs are arguments for the "output" command.
 type OutputArgs struct {
 	BreakpointUpdates
+}
+
+// ThreadInfo represents a thread in the debugged program.
+type ThreadInfo struct {
+	ID      int    `json:"id"`
+	Name    string `json:"name"`
+	Current bool   `json:"current,omitempty"`
+}
+
+// ThreadArgs are arguments for the "thread" command.
+type ThreadArgs struct {
+	ThreadID     int `json:"thread_id"`
+	ContextLines int `json:"context_lines,omitempty"`
+}
+
+// InspectArgs are arguments for the "inspect" command.
+type InspectArgs struct {
+	Variable string `json:"variable"`
+	Depth    int    `json:"depth,omitempty"` // default 1, max 5
+	Frame    int    `json:"frame,omitempty"`
+}
+
+// InspectResult holds the result of an inspect command.
+type InspectResult struct {
+	Name     string          `json:"name"`
+	Type     string          `json:"type,omitempty"`
+	Value    string          `json:"value"`
+	Children []InspectResult `json:"children,omitempty"`
 }
 
 // BreakAddArgs are arguments for the "break_add" command.

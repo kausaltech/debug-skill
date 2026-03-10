@@ -14,6 +14,19 @@ func FormatText(r *ContextResult) string {
 
 	var b strings.Builder
 
+	// Thread list result (special case)
+	if r.IsThreadList {
+		b.WriteString("Threads:\n")
+		for _, t := range r.Threads {
+			marker := " "
+			if t.Current {
+				marker = "*"
+			}
+			fmt.Fprintf(&b, "  %s #%d %s\n", marker, t.ID, t.Name)
+		}
+		return b.String()
+	}
+
 	// Break list result (special case)
 	if r.IsBreakList {
 		if len(r.Breakpoints) > 0 {
@@ -32,6 +45,12 @@ func FormatText(r *ContextResult) string {
 		} else {
 			b.WriteString("\nException filters: (none)\n")
 		}
+		return b.String()
+	}
+
+	// Inspect result (special case)
+	if r.InspectResult != nil {
+		formatInspectTree(&b, r.InspectResult, 0)
 		return b.String()
 	}
 
@@ -69,6 +88,17 @@ func FormatText(r *ContextResult) string {
 				marker = ">"
 			}
 			fmt.Fprintf(&b, "  %3d%s| %s\n", line.Line, marker, line.Text)
+		}
+	}
+
+	// Exception info
+	if r.ExceptionInfo != nil {
+		fmt.Fprintf(&b, "\nException: %s\n", r.ExceptionInfo.ExceptionID)
+		if r.ExceptionInfo.Description != "" {
+			fmt.Fprintf(&b, "  %s\n", r.ExceptionInfo.Description)
+		}
+		if r.ExceptionInfo.Details != "" {
+			fmt.Fprintf(&b, "  %s\n", r.ExceptionInfo.Details)
 		}
 	}
 
@@ -113,6 +143,19 @@ func FormatText(r *ContextResult) string {
 	}
 
 	return b.String()
+}
+
+// formatInspectTree renders an InspectResult tree with indentation.
+func formatInspectTree(b *strings.Builder, r *InspectResult, indent int) {
+	prefix := strings.Repeat("  ", indent)
+	if r.Type != "" {
+		fmt.Fprintf(b, "%s%s (%s) = %s\n", prefix, r.Name, r.Type, r.Value)
+	} else {
+		fmt.Fprintf(b, "%s%s = %s\n", prefix, r.Name, r.Value)
+	}
+	for i := range r.Children {
+		formatInspectTree(b, &r.Children[i], indent+1)
+	}
 }
 
 // FormatJSON formats a ContextResult as JSON.

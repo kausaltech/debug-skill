@@ -64,6 +64,8 @@ type Backend interface {
 	// StopOnEntryBreakpoint returns a function name to use as a breakpoint
 	// for stop-on-entry behavior. If empty, native stopOnEntry is used.
 	StopOnEntryBreakpoint() string
+	// PIDAttachArgs returns attach arguments for attaching to a local process by PID.
+	PIDAttachArgs(pid int) (map[string]any, error)
 }
 
 // DetectBackend returns the appropriate backend based on file extension.
@@ -152,6 +154,14 @@ func (b *debugpyBackend) LaunchArgs(program string, stopOnEntry bool, args []str
 func (b *debugpyBackend) RemoteAttachArgs(host string, port int) (map[string]any, error) {
 	return map[string]any{
 		"request":    "attach",
+		"justMyCode": false,
+	}, nil
+}
+
+func (b *debugpyBackend) PIDAttachArgs(pid int) (map[string]any, error) {
+	return map[string]any{
+		"request":    "attach",
+		"processId":  pid,
 		"justMyCode": false,
 	}, nil
 }
@@ -254,6 +264,16 @@ func (b *delveBackend) RemoteAttachArgs(host string, port int) (map[string]any, 
 		"host":           host,
 		"port":           port,
 		"substitutePath": []any{},
+	}, nil
+}
+
+// PIDAttachArgs for dlv uses "launch" with "local" mode (not "attach"),
+// because dlv's DAP API requires this for local process attachment.
+func (b *delveBackend) PIDAttachArgs(pid int) (map[string]any, error) {
+	return map[string]any{
+		"request":   "launch",
+		"mode":      "local",
+		"processId": pid,
 	}, nil
 }
 
@@ -425,6 +445,13 @@ func (b *lldbBackend) RemoteAttachArgs(host string, port int) (map[string]any, e
 	return nil, fmt.Errorf("lldb-dap does not support remote attach")
 }
 
+func (b *lldbBackend) PIDAttachArgs(pid int) (map[string]any, error) {
+	return map[string]any{
+		"request": "attach",
+		"pid":     pid,
+	}, nil
+}
+
 // --- js-debug backend (Node.js/TypeScript) ---
 
 type jsDebugBackend struct{}
@@ -501,5 +528,13 @@ func (b *jsDebugBackend) RemoteAttachArgs(host string, port int) (map[string]any
 		"request": "attach",
 		"address": host,
 		"port":    port,
+	}, nil
+}
+
+func (b *jsDebugBackend) PIDAttachArgs(pid int) (map[string]any, error) {
+	return map[string]any{
+		"type":      "pwa-node",
+		"request":   "attach",
+		"processId": pid,
 	}, nil
 }

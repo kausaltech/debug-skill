@@ -78,6 +78,96 @@ func TestFormatResponse_Error(t *testing.T) {
 	}
 }
 
+func TestFormatText_ExceptionInfo(t *testing.T) {
+	result := &ContextResult{
+		Reason: "exception",
+		Location: &Location{
+			File:     "app.py",
+			Line:     3,
+			Function: "convert",
+		},
+		ExceptionInfo: &ExceptionInfo{
+			ExceptionID: "ValueError",
+			Description: "invalid literal for int() with base 10: 'abc'",
+		},
+	}
+	text := FormatText(result)
+	if !strings.Contains(text, "Exception: ValueError") {
+		t.Errorf("expected Exception: ValueError, got:\n%s", text)
+	}
+	if !strings.Contains(text, "invalid literal") {
+		t.Errorf("expected exception description, got:\n%s", text)
+	}
+}
+
+func TestFormatText_ExceptionInfoWithDetails(t *testing.T) {
+	result := &ContextResult{
+		Reason: "exception",
+		ExceptionInfo: &ExceptionInfo{
+			ExceptionID: "RuntimeError",
+			Description: "something went wrong",
+			Details:     "stack trace details here",
+		},
+	}
+	text := FormatText(result)
+	if !strings.Contains(text, "Exception: RuntimeError") {
+		t.Errorf("expected RuntimeError, got:\n%s", text)
+	}
+	if !strings.Contains(text, "stack trace details here") {
+		t.Errorf("expected details, got:\n%s", text)
+	}
+}
+
+func TestFormatText_ThreadList(t *testing.T) {
+	result := &ContextResult{
+		IsThreadList: true,
+		Threads: []ThreadInfo{
+			{ID: 1, Name: "MainThread", Current: true},
+			{ID: 2, Name: "Thread-1"},
+		},
+	}
+	text := FormatText(result)
+	if !strings.Contains(text, "Threads:") {
+		t.Errorf("expected Threads header, got:\n%s", text)
+	}
+	if !strings.Contains(text, "* #1 MainThread") {
+		t.Errorf("expected current thread marker, got:\n%s", text)
+	}
+	if !strings.Contains(text, "  #2 Thread-1") && !strings.Contains(text, "#2 Thread-1") {
+		t.Errorf("expected non-current thread, got:\n%s", text)
+	}
+}
+
+func TestFormatText_InspectResult(t *testing.T) {
+	result := &ContextResult{
+		InspectResult: &InspectResult{
+			Name:  "data",
+			Type:  "dict",
+			Value: `{'key': {'nested': 1}}`,
+			Children: []InspectResult{
+				{
+					Name:  "key",
+					Type:  "dict",
+					Value: `{'nested': 1}`,
+					Children: []InspectResult{
+						{Name: "nested", Type: "int", Value: "1"},
+					},
+				},
+			},
+		},
+	}
+	text := FormatText(result)
+	if !strings.Contains(text, "data (dict) =") {
+		t.Errorf("expected data header, got:\n%s", text)
+	}
+	if !strings.Contains(text, "  key (dict) =") {
+		t.Errorf("expected indented key, got:\n%s", text)
+	}
+	if !strings.Contains(text, "    nested (int) = 1") {
+		t.Errorf("expected double-indented nested, got:\n%s", text)
+	}
+}
+
 func TestFormatResponse_Terminated(t *testing.T) {
 	exitCode := 0
 	resp := &Response{

@@ -67,14 +67,21 @@ type Daemon struct {
 	// Cleanup function for temp binaries (e.g. Go, Rust compilation)
 	cleanupFn func()
 
+	// Last debug args for restart
+	lastDebugArgs json.RawMessage
+
 	// Adapter address and config for child session creation (js-debug multi-session)
 	adapterAddr string
-	// sessionBreaks and sessionExceptionFilters are only accessed from handler methods
-	// (single-threaded dispatch via Serve) — no mutex needed.
-	// d.client is guarded by clientMu for pointer swaps (readLoop↔handlers); once
-	// requireSession passes, handlers use d.client directly (sequential dispatch).
+	// sessionBreaks and sessionExceptionFilters are accessed from handler methods
+	// serialized by cmdMu. Interrupt commands (pause, stop) don't modify them.
+	// d.client is guarded by clientMu for pointer swaps (readLoop↔handlers).
 	sessionBreaks           []Breakpoint // stored breakpoints for child session re-init
 	sessionExceptionFilters []string     // stored exception filter IDs for child session re-init
+
+	// Command serialization: most commands hold cmdMu for their duration.
+	// Interrupt commands (pause, stop) skip it so they can run while a
+	// blocking command (continue/step/debug) is in progress.
+	cmdMu sync.Mutex
 
 	// Socket
 	listener   net.Listener
@@ -305,7 +312,8 @@ func (d *Daemon) readLoop() {
 
 // waitForStopped waits for a StoppedEvent or TerminatedEvent, skipping responses and other events.
 // ExitedEvent → captures exit code, continues waiting for TerminatedEvent.
-func (d *Daemon) waitForStopped() (*ContextResult, error) {
+// contextLines overrides the default source context window; 0 means use default.
+func (d *Daemon) waitForStopped(contextLines int) (*ContextResult, error) {
 	var exitCode *int
 	for {
 		msg, err := d.readExpected()
@@ -315,11 +323,29 @@ func (d *Daemon) waitForStopped() (*ContextResult, error) {
 		switch m := msg.(type) {
 		case *godap.StoppedEvent:
 			d.threadID = resolveThreadID(m.Body.ThreadId)
-			ctx, err := getFullContext(d, d.threadID, 0)
+			ctx, err := getFullContext(d, d.threadID, 0, contextLines)
 			if err != nil {
 				return nil, fmt.Errorf("getting context: %w", err)
 			}
 			ctx.Reason = m.Body.Reason
+
+			// Fetch exception info when stopped on an exception
+			if m.Body.Reason == "exception" {
+				if err := d.client.ExceptionInfoRequest(d.threadID); err == nil {
+					if emsg, eerr := d.readExpected(); eerr == nil {
+						if eresp, ok := emsg.(*godap.ExceptionInfoResponse); ok && eresp.Success {
+							ctx.ExceptionInfo = &ExceptionInfo{
+								ExceptionID: eresp.Body.ExceptionId,
+								Description: eresp.Body.Description,
+							}
+							if eresp.Body.Details != nil {
+								ctx.ExceptionInfo.Details = eresp.Body.Details.Message
+							}
+						}
+					}
+				}
+			}
+
 			return ctx, nil
 		case *godap.ExitedEvent:
 			ec := m.Body.ExitCode
@@ -385,10 +411,14 @@ func (d *Daemon) Serve(socketPath string) error {
 			if d.listener == nil {
 				return nil // shut down
 			}
+			// Closed listener during cleanup — exit silently
+			if strings.Contains(err.Error(), "use of closed") {
+				return nil
+			}
 			log.Printf("accept error: %v", err)
 			continue
 		}
-		d.handleConnection(conn)
+		go d.handleConnection(conn)
 	}
 }
 
@@ -412,6 +442,17 @@ func (d *Daemon) dispatch(req Request) *Response {
 	if d.idleTimer != nil {
 		d.idleTimer.Reset(idleTimeout())
 	}
+
+	// Interrupt commands (pause, stop) run without holding cmdMu so they
+	// can execute while a blocking command (continue/step/debug) is in progress.
+	switch req.Command {
+	case "pause", "stop":
+		// no lock
+	default:
+		d.cmdMu.Lock()
+		defer d.cmdMu.Unlock()
+	}
+
 	resp := d.dispatchCommand(req)
 	if resp.Status != "error" {
 		d.attachWarnings(resp)
@@ -431,6 +472,8 @@ func (d *Daemon) dispatchCommand(req Request) *Response {
 		return d.handleContext(req.Args)
 	case "eval":
 		return d.handleEval(req.Args)
+	case "inspect":
+		return d.handleInspect(req.Args)
 	case "output":
 		return d.handleOutput(req.Args)
 	case "break_list":
@@ -441,6 +484,14 @@ func (d *Daemon) dispatchCommand(req Request) *Response {
 		return d.handleBreakRemove(req.Args)
 	case "break_clear":
 		return d.handleBreakClear()
+	case "pause":
+		return d.handlePause(req.Args)
+	case "threads":
+		return d.handleThreads()
+	case "thread":
+		return d.handleThread(req.Args)
+	case "restart":
+		return d.handleRestart()
 	case "stop":
 		return d.handleStop()
 	case "ping":
@@ -456,6 +507,9 @@ func (d *Daemon) handleDebug(rawArgs json.RawMessage) *Response {
 		return errResponsef("invalid args: %v", err)
 	}
 
+	// Store raw args for restart
+	d.lastDebugArgs = rawArgs
+
 	// Select backend
 	var backend Backend
 	if args.Backend != "" {
@@ -468,15 +522,36 @@ func (d *Daemon) handleDebug(rawArgs json.RawMessage) *Response {
 		backend = DetectBackend(args.Script)
 	} else if args.Attach != "" {
 		return errResponse("backend required for remote attach (e.g. --backend debugpy)")
+	} else if args.PID > 0 {
+		return errResponse("backend required for PID attach (e.g. --backend debugpy)")
 	} else {
-		return errResponse("script path or --attach required")
+		return errResponse("script path, --attach, or --pid required")
 	}
 	d.backend = backend
 	d.stopSession() // clean up any previous session
 
 	isRemote := args.Attach != ""
+	isPID := args.PID > 0
 
-	if isRemote {
+	if isPID {
+		// PID attach: spawn local adapter, connect, initialize, then attach with PID args
+		if err := d.startAdapter(backend); err != nil {
+			return errResponse(err.Error())
+		}
+		if err := d.initializeDAP(backend); err != nil {
+			return errResponse(err.Error())
+		}
+
+		pidArgs, err := backend.PIDAttachArgs(args.PID)
+		if err != nil {
+			d.stopSession()
+			return errResponsef("preparing PID attach: %v", err)
+		}
+		if err := d.client.AttachRequestWithArgs(pidArgs); err != nil {
+			d.stopSession()
+			return errResponsef("PID attach: %v", err)
+		}
+	} else if isRemote {
 		// Connect directly to the remote DAP server
 		client, err := newDAPClient(args.Attach)
 		if err != nil {
@@ -558,7 +633,7 @@ func (d *Daemon) handleDebug(rawArgs json.RawMessage) *Response {
 
 	// Send all config requests without waiting for individual responses.
 	// DAP is async — responses will be consumed by waitForStopped below.
-	stopOnEntry := !isRemote && (args.StopOnEntry || len(args.Breaks) == 0)
+	stopOnEntry := !isRemote && !isPID && (args.StopOnEntry || len(args.Breaks) == 0)
 	entryBP := backend.StopOnEntryBreakpoint()
 	if stopOnEntry && entryBP != "" {
 		if err := d.client.SetFunctionBreakpointsRequest([]string{entryBP}); err != nil {
@@ -591,7 +666,7 @@ func (d *Daemon) handleDebug(rawArgs json.RawMessage) *Response {
 
 	// Wait for first stop. If we get an "entry" stop and have breakpoints, continue past it.
 	for {
-		ctx, err := d.waitForStopped()
+		ctx, err := d.waitForStopped(args.ContextLines)
 		if err != nil {
 			d.stopSession()
 			return errResponse(err.Error())
@@ -680,7 +755,7 @@ func (d *Daemon) handleStep(rawArgs json.RawMessage) *Response {
 		return errResponsef("invalid step mode %q — use: in, out, over", args.Mode)
 	}
 
-	return d.awaitStopResult()
+	return d.awaitStopResult(args.ContextLines)
 }
 
 func (d *Daemon) handleContinue(rawArgs json.RawMessage) *Response {
@@ -699,13 +774,60 @@ func (d *Daemon) handleContinue(rawArgs json.RawMessage) *Response {
 		return errResp
 	}
 
+	// --to: add temp breakpoint before continuing
+	if args.ContinueTo != nil {
+		if err := d.updateBreakpoints([]Breakpoint{*args.ContinueTo}, nil); err != nil {
+			return errResponsef("set temp breakpoint: %v", err)
+		}
+	}
+
 	threadID := resolveThreadID(d.threadID)
 
 	if err := d.client.ContinueRequest(threadID); err != nil {
 		return errResponsef("continue: %v", err)
 	}
 
-	return d.awaitStopResult()
+	resp := d.awaitStopResult(args.ContextLines)
+
+	// --to: remove temp breakpoint after stop (whether stopped or terminated)
+	if args.ContinueTo != nil {
+		if d.getClient() != nil {
+			_ = d.updateBreakpoints(nil, []Breakpoint{*args.ContinueTo})
+		} else {
+			// Session ended — just clean sessionBreaks directly
+			d.sessionBreaks = mergeBreakpoints(d.sessionBreaks, nil, []Breakpoint{*args.ContinueTo})
+		}
+	}
+
+	return resp
+}
+
+func (d *Daemon) handlePause(rawArgs json.RawMessage) *Response {
+	if resp := d.requireSession(); resp != nil {
+		return resp
+	}
+
+	var args PauseArgs
+	if rawArgs != nil {
+		if err := json.Unmarshal(rawArgs, &args); err != nil {
+			return errResponsef("invalid args: %v", err)
+		}
+	}
+
+	if errResp := d.applyBreakpointUpdates(args.BreakpointUpdates); errResp != nil {
+		return errResp
+	}
+
+	threadID := resolveThreadID(d.threadID)
+
+	if err := d.client.PauseRequest(threadID); err != nil {
+		return errResponsef("pause: %v", err)
+	}
+
+	// Don't call awaitStopResult here — the already-blocking command
+	// (continue/step/debug) will consume the StoppedEvent and return
+	// the auto-context to its caller.
+	return &Response{Status: "ok"}
 }
 
 func (d *Daemon) handleContext(rawArgs json.RawMessage) *Response {
@@ -726,11 +848,130 @@ func (d *Daemon) handleContext(rawArgs json.RawMessage) *Response {
 
 	threadID := resolveThreadID(d.threadID)
 
-	ctx, err := getFullContext(d, threadID, args.Frame)
+	ctx, err := getFullContext(d, threadID, args.Frame, args.ContextLines)
 	if err != nil {
 		return errResponse(err.Error())
 	}
 	return &Response{Status: "stopped", Data: ctx}
+}
+
+func (d *Daemon) handleInspect(rawArgs json.RawMessage) *Response {
+	if resp := d.requireSession(); resp != nil {
+		return resp
+	}
+
+	var args InspectArgs
+	if err := json.Unmarshal(rawArgs, &args); err != nil {
+		return errResponsef("invalid args: %v", err)
+	}
+	if args.Variable == "" {
+		return errResponse("variable name required")
+	}
+	if args.Depth <= 0 {
+		args.Depth = 1
+	}
+	if args.Depth > 5 {
+		args.Depth = 5
+	}
+
+	// Resolve target frame
+	frameID := d.frameID
+	if args.Frame > 0 {
+		if args.Frame >= len(d.frameIDs) {
+			return errResponsef("frame %d out of range (stack has %d frames)", args.Frame, len(d.frameIDs))
+		}
+		frameID = d.frameIDs[args.Frame]
+	}
+
+	// Get scopes
+	if err := d.client.ScopesRequest(frameID); err != nil {
+		return errResponsef("scopes request: %v", err)
+	}
+
+	var scopes []godap.Scope
+	for {
+		msg, err := d.readExpected()
+		if err != nil {
+			return errResponsef("reading scopes: %v", err)
+		}
+		if resp, ok := msg.(*godap.ScopesResponse); ok {
+			scopes = resp.Body.Scopes
+			break
+		}
+		if _, ok := msg.(*godap.ErrorResponse); ok {
+			break
+		}
+	}
+
+	// Search for variable: first in locals/arguments, then fall back to all scopes
+	isLocalScope := func(name string) bool {
+		name = strings.ToLower(name)
+		return strings.Contains(name, "local") || strings.Contains(name, "argument") ||
+			name == "locals" || name == "arguments"
+	}
+
+	searchScopes := func(filter func(string) bool) *Response {
+		for _, scope := range scopes {
+			if scope.VariablesReference == 0 {
+				continue
+			}
+			if filter != nil && !filter(scope.Name) {
+				continue
+			}
+
+			if err := d.client.VariablesRequest(scope.VariablesReference); err != nil {
+				continue
+			}
+
+			for {
+				msg, err := d.readExpected()
+				if err != nil {
+					break
+				}
+				if _, ok := msg.(*godap.ErrorResponse); ok {
+					break
+				}
+				resp, ok := msg.(*godap.VariablesResponse)
+				if !ok {
+					continue
+				}
+				if !resp.Success {
+					break
+				}
+
+				for _, v := range resp.Body.Variables {
+					if v.Name == args.Variable {
+						nodeCount := 1
+						result := InspectResult{
+							Name:  v.Name,
+							Type:  v.Type,
+							Value: truncateString(v.Value, maxStringLen),
+						}
+						if v.VariablesReference > 0 {
+							result.Children = expandVariable(d, v.VariablesReference, 0, args.Depth, &nodeCount, 100)
+						}
+						return &Response{
+							Status: "ok",
+							Data:   &ContextResult{InspectResult: &result},
+						}
+					}
+				}
+				break
+			}
+		}
+		return nil
+	}
+
+	// First pass: locals/arguments only
+	if resp := searchScopes(isLocalScope); resp != nil {
+		return resp
+	}
+	// Second pass: all remaining scopes (globals, module, etc.)
+	if resp := searchScopes(func(name string) bool { return !isLocalScope(name) }); resp != nil {
+		return resp
+	}
+
+	return errResponsef("variable %q not found in current scope", args.Variable)
 }
 
 func (d *Daemon) handleEval(rawArgs json.RawMessage) *Response {
@@ -923,6 +1164,71 @@ func (d *Daemon) handleBreakClear() *Response {
 	return &Response{Status: "ok"}
 }
 
+func (d *Daemon) handleThreads() *Response {
+	if resp := d.requireSession(); resp != nil {
+		return resp
+	}
+
+	if err := d.client.ThreadsRequest(); err != nil {
+		return errResponsef("threads request: %v", err)
+	}
+
+	for {
+		msg, err := d.readExpected()
+		if err != nil {
+			return errResponsef("reading threads: %v", err)
+		}
+		if resp, ok := msg.(*godap.ThreadsResponse); ok {
+			if !resp.Success {
+				return errResponsef("threads failed: %s", resp.Message)
+			}
+			threads := make([]ThreadInfo, len(resp.Body.Threads))
+			for i, t := range resp.Body.Threads {
+				threads[i] = ThreadInfo{
+					ID:      t.Id,
+					Name:    t.Name,
+					Current: t.Id == d.threadID,
+				}
+			}
+			return &Response{Status: "ok", Data: &ContextResult{Threads: threads, IsThreadList: true}}
+		}
+		if _, ok := msg.(*godap.ErrorResponse); ok {
+			return errResponse("threads request failed")
+		}
+	}
+}
+
+func (d *Daemon) handleThread(rawArgs json.RawMessage) *Response {
+	if resp := d.requireSession(); resp != nil {
+		return resp
+	}
+
+	var args ThreadArgs
+	if err := json.Unmarshal(rawArgs, &args); err != nil {
+		return errResponsef("invalid args: %v", err)
+	}
+	if args.ThreadID == 0 {
+		return errResponse("thread ID required")
+	}
+
+	prevThreadID := d.threadID
+	d.threadID = args.ThreadID
+	ctx, err := getFullContext(d, d.threadID, 0, args.ContextLines)
+	if err != nil {
+		d.threadID = prevThreadID // restore on failure
+		return errResponse(err.Error())
+	}
+	return &Response{Status: "stopped", Data: ctx}
+}
+
+func (d *Daemon) handleRestart() *Response {
+	if d.lastDebugArgs == nil {
+		return errResponse("no previous debug session to restart — run 'dap debug' first")
+	}
+	d.stopSession()
+	return d.handleDebug(d.lastDebugArgs)
+}
+
 func (d *Daemon) handleStop() *Response {
 	d.stopSession()
 	// Schedule daemon exit after responding
@@ -956,9 +1262,9 @@ func (d *Daemon) stopSession() {
 
 func (d *Daemon) cleanup() {
 	d.stopSession()
-	if d.listener != nil {
-		_ = d.listener.Close()
-		d.listener = nil
+	if l := d.listener; l != nil {
+		d.listener = nil // mark closed before Close so accept loop exits immediately
+		_ = l.Close()
 	}
 	_ = os.Remove(d.socketPath)
 	_ = os.Remove(d.socketPath + ".pid")
@@ -1087,9 +1393,9 @@ func resolveThreadID(threadID int) int {
 }
 
 // awaitStopResult calls waitForStopped and returns an appropriate response.
-// Used by handleStep and handleContinue.
-func (d *Daemon) awaitStopResult() *Response {
-	ctx, err := d.waitForStopped()
+// Used by handleStep, handleContinue, and handlePause.
+func (d *Daemon) awaitStopResult(contextLines int) *Response {
+	ctx, err := d.waitForStopped(contextLines)
 	if err != nil {
 		return errResponse(err.Error())
 	}

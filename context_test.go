@@ -26,6 +26,14 @@ func TestReadSourceLines(t *testing.T) {
 	}
 }
 
+func TestReadSourceLinesCustomContext(t *testing.T) {
+	// simple.py has 4 lines. With context=5 at line 2, should get all 4 lines.
+	lines := readSourceLines("testdata/python/simple.py", 2, 5)
+	if len(lines) < 4 {
+		t.Errorf("expected at least 4 lines with context=5, got %d", len(lines))
+	}
+}
+
 func TestReadSourceLines_Missing(t *testing.T) {
 	lines := readSourceLines("/nonexistent/file.py", 1, 2)
 	if lines != nil {

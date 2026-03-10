@@ -12,6 +12,39 @@ import (
 	"time"
 )
 
+// e2eBinary is the path to the built binary, shared across all E2E tests.
+// Built once in TestMain.
+var e2eBinary string
+
+func TestMain(m *testing.M) {
+	// Build binary once for all E2E tests.
+	tmp, err := os.MkdirTemp("", "dap-e2e-*")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "creating temp dir: %v\n", err)
+		os.Exit(1)
+	}
+	defer func() { _ = os.RemoveAll(tmp) }()
+
+	binary := filepath.Join(tmp, "dap")
+	build := exec.Command("go", "build", "-o", binary, "./cmd/dap")
+	// Find project root from current dir
+	dir, _ := os.Getwd()
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			break
+		}
+		dir = filepath.Dir(dir)
+	}
+	build.Dir = dir
+	if out, err := build.CombinedOutput(); err != nil {
+		fmt.Fprintf(os.Stderr, "build failed: %s\n%s\n", err, out)
+		os.Exit(1)
+	}
+	e2eBinary = binary
+
+	os.Exit(m.Run())
+}
+
 // e2eEnv holds a built binary, running daemon, and helper to run CLI commands.
 type e2eEnv struct {
 	t          *testing.T
@@ -22,12 +55,8 @@ type e2eEnv struct {
 
 func newE2EEnv(t *testing.T) *e2eEnv {
 	t.Helper()
-
-	binary := filepath.Join(t.TempDir(), "dap")
-	build := exec.Command("go", "build", "-o", binary, "./cmd/dap")
-	build.Dir = projectRoot(t)
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build failed: %s\n%s", err, out)
+	if testing.Short() {
+		t.Skip("skipping E2E test in short mode")
 	}
 
 	// Use /tmp for socket to avoid Unix socket path length limit (~104 bytes on macOS).
@@ -39,7 +68,7 @@ func newE2EEnv(t *testing.T) *e2eEnv {
 	t.Cleanup(func() { _ = os.RemoveAll(sockDir) })
 	socketPath := filepath.Join(sockDir, "test.sock")
 
-	daemon := exec.Command(binary, "__daemon", "--socket", socketPath)
+	daemon := exec.Command(e2eBinary, "__daemon", "--socket", socketPath)
 	daemon.Stdout = os.Stderr
 	daemon.Stderr = os.Stderr
 	if err := daemon.Start(); err != nil {
@@ -54,9 +83,9 @@ func newE2EEnv(t *testing.T) *e2eEnv {
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	env := &e2eEnv{t: t, binary: binary, socketPath: socketPath, daemon: daemon}
+	env := &e2eEnv{t: t, binary: e2eBinary, socketPath: socketPath, daemon: daemon}
 	t.Cleanup(func() {
-		_ = exec.Command(binary, "stop", "--socket", socketPath).Run()
+		_ = exec.Command(e2eBinary, "stop", "--socket", socketPath).Run()
 		_ = daemon.Process.Kill()
 		_ = daemon.Wait()
 		_ = os.Remove(socketPath)
@@ -510,6 +539,300 @@ func TestE2E_ConditionalBreakpoint(t *testing.T) {
 	}
 }
 
+// TestE2E_Pause tests the pause command on a long-running Python script.
+func TestE2E_Pause(t *testing.T) {
+	if err := exec.Command("python3", "-c", "import debugpy").Run(); err != nil {
+		t.Skip("debugpy not installed")
+	}
+
+	env := newE2EEnv(t)
+	scriptPath := filepath.Join(projectRoot(t), "testdata", "python", "long_loop.py")
+
+	// 1. Debug with breakpoint at line 3 (i = 0, before loop)
+	out, err := env.run("debug", scriptPath, "--break", scriptPath+":3")
+	if err != nil {
+		t.Fatalf("debug failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Stopped: breakpoint") {
+		t.Errorf("expected breakpoint stop, got:\n%s", out)
+	}
+
+	// 2. Continue (loop will run) — then pause from another goroutine.
+	// Pause sends PauseRequest and returns OK immediately; the blocking
+	// continue call receives the StoppedEvent.
+	doneCh := make(chan string, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		o, e := env.run("continue")
+		doneCh <- o
+		errCh <- e
+	}()
+
+	// Give the program time to enter the loop
+	time.Sleep(500 * time.Millisecond)
+
+	// 3. Pause — returns OK immediately
+	pauseOut, pauseErr := env.run("pause")
+	if pauseErr != nil {
+		t.Fatalf("pause failed: %v\n%s", pauseErr, pauseOut)
+	}
+	if !strings.Contains(pauseOut, "OK") {
+		t.Errorf("expected OK from pause, got:\n%s", pauseOut)
+	}
+
+	// 4. Continue goroutine should return with pause stop
+	continueOut := <-doneCh
+	if err := <-errCh; err != nil {
+		t.Fatalf("continue failed after pause: %v\n%s", err, continueOut)
+	}
+	if !strings.Contains(continueOut, "Stopped: pause") {
+		t.Errorf("expected Stopped: pause from continue, got:\n%s", continueOut)
+	}
+
+	// 5. Stop
+	out, err = env.run("stop")
+	if err != nil {
+		t.Fatalf("stop failed: %v\n%s", err, out)
+	}
+}
+
+// TestE2E_ContinueTo tests the continue --to flag (temp breakpoint).
+func TestE2E_ContinueTo(t *testing.T) {
+	if err := exec.Command("python3", "-c", "import debugpy").Run(); err != nil {
+		t.Skip("debugpy not installed")
+	}
+
+	env := newE2EEnv(t)
+	scriptPath := filepath.Join(projectRoot(t), "testdata", "python", "simple.py")
+
+	// 1. Debug with --stop-on-entry
+	out, err := env.run("debug", scriptPath, "--stop-on-entry")
+	if err != nil {
+		t.Fatalf("debug failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Stopped:") {
+		t.Errorf("expected stopped, got:\n%s", out)
+	}
+
+	// 2. continue --to simple.py:4 — should stop at line 4
+	out, err = env.run("continue", "--to", scriptPath+":4")
+	if err != nil {
+		t.Fatalf("continue --to failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, ":4") {
+		t.Errorf("expected stop at line 4, got:\n%s", out)
+	}
+
+	// 3. break list — temp BP should be gone
+	out, err = env.run("break", "list")
+	if err != nil {
+		t.Fatalf("break list failed: %v\n%s", err, out)
+	}
+	if strings.Contains(out, ":4") {
+		t.Errorf("temp breakpoint at :4 should be removed, got:\n%s", out)
+	}
+
+	// 4. continue — should terminate normally
+	out, err = env.run("continue")
+	if err != nil {
+		t.Fatalf("continue failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Program terminated") {
+		t.Errorf("expected terminated, got:\n%s", out)
+	}
+
+	// 5. Stop
+	out, err = env.run("stop")
+	if err != nil {
+		t.Fatalf("stop failed: %v\n%s", err, out)
+	}
+}
+
+// TestE2E_ExceptionInfo tests exception info in auto-context.
+func TestE2E_ExceptionInfo(t *testing.T) {
+	if err := exec.Command("python3", "-c", "import debugpy").Run(); err != nil {
+		t.Skip("debugpy not installed")
+	}
+
+	env := newE2EEnv(t)
+	scriptPath := filepath.Join(projectRoot(t), "testdata", "python", "exception.py")
+
+	// Debug with a breakpoint (to avoid stop-on-entry) and userUnhandled exception filter.
+	// The breakpoint at line 4 is where convert("abc") is called — it will stop there first.
+	out, err := env.run("debug", scriptPath, "--break", scriptPath+":4", "--break-on-exception", "userUnhandled")
+	if err != nil {
+		t.Fatalf("debug failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Stopped: breakpoint") {
+		t.Errorf("expected breakpoint stop, got:\n%s", out)
+	}
+
+	// Continue — should hit the ValueError exception
+	out, err = env.run("continue")
+	if err != nil {
+		t.Fatalf("continue failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Stopped: exception") {
+		t.Errorf("expected exception stop, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Exception:") {
+		t.Errorf("expected Exception: in output, got:\n%s", out)
+	}
+	if !strings.Contains(out, "ValueError") {
+		t.Errorf("expected ValueError, got:\n%s", out)
+	}
+
+	// Stop
+	out, err = env.run("stop")
+	if err != nil {
+		t.Fatalf("stop failed: %v\n%s", err, out)
+	}
+}
+
+// TestE2E_Inspect tests the inspect command with nested variables.
+func TestE2E_Inspect(t *testing.T) {
+	if err := exec.Command("python3", "-c", "import debugpy").Run(); err != nil {
+		t.Skip("debugpy not installed")
+	}
+
+	env := newE2EEnv(t)
+	scriptPath := filepath.Join(projectRoot(t), "testdata", "python", "nested.py")
+
+	// Debug with breakpoint at line 2 (after data is defined)
+	out, err := env.run("debug", scriptPath, "--break", scriptPath+":2")
+	if err != nil {
+		t.Fatalf("debug failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Stopped: breakpoint") {
+		t.Errorf("expected breakpoint stop, got:\n%s", out)
+	}
+
+	// Inspect data at depth 2
+	out, err = env.run("inspect", "data", "--depth", "2")
+	if err != nil {
+		t.Fatalf("inspect failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "data") {
+		t.Errorf("expected data in inspect output, got:\n%s", out)
+	}
+	// Should have children (key, flat)
+	if !strings.Contains(out, "key") {
+		t.Errorf("expected 'key' child in inspect output, got:\n%s", out)
+	}
+
+	// Stop
+	out, err = env.run("stop")
+	if err != nil {
+		t.Fatalf("stop failed: %v\n%s", err, out)
+	}
+}
+
+// TestE2E_ContextLines tests --context-lines flag.
+func TestE2E_ContextLines(t *testing.T) {
+	if err := exec.Command("python3", "-c", "import debugpy").Run(); err != nil {
+		t.Skip("debugpy not installed")
+	}
+
+	env := newE2EEnv(t)
+	scriptPath := filepath.Join(projectRoot(t), "testdata", "python", "simple.py")
+
+	// Debug with breakpoint at line 2
+	out, err := env.run("debug", scriptPath, "--break", scriptPath+":2")
+	if err != nil {
+		t.Fatalf("debug failed: %v\n%s", err, out)
+	}
+
+	// context --context-lines 5 should show more source lines
+	out, err = env.run("context", "--context-lines", "5")
+	if err != nil {
+		t.Fatalf("context --context-lines failed: %v\n%s", err, out)
+	}
+	// simple.py has 4 lines. With context=5 around line 2, we should see all lines.
+	if !strings.Contains(out, "x = 1") {
+		t.Errorf("expected 'x = 1' in context output, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Result:") {
+		t.Errorf("expected 'Result:' in wider context output, got:\n%s", out)
+	}
+
+	// Stop
+	out, err = env.run("stop")
+	if err != nil {
+		t.Fatalf("stop failed: %v\n%s", err, out)
+	}
+}
+
+// TestE2E_Threads tests the threads command.
+func TestE2E_Threads(t *testing.T) {
+	if err := exec.Command("python3", "-c", "import debugpy").Run(); err != nil {
+		t.Skip("debugpy not installed")
+	}
+
+	env := newE2EEnv(t)
+	scriptPath := filepath.Join(projectRoot(t), "testdata", "python", "simple.py")
+
+	// Debug with breakpoint
+	out, err := env.run("debug", scriptPath, "--break", scriptPath+":2")
+	if err != nil {
+		t.Fatalf("debug failed: %v\n%s", err, out)
+	}
+
+	// List threads
+	out, err = env.run("threads")
+	if err != nil {
+		t.Fatalf("threads failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Threads:") {
+		t.Errorf("expected Threads header, got:\n%s", out)
+	}
+	if !strings.Contains(out, "*") {
+		t.Errorf("expected current thread marker, got:\n%s", out)
+	}
+
+	// Stop
+	out, err = env.run("stop")
+	if err != nil {
+		t.Fatalf("stop failed: %v\n%s", err, out)
+	}
+}
+
+// TestE2E_Restart tests the restart command.
+func TestE2E_Restart(t *testing.T) {
+	if err := exec.Command("python3", "-c", "import debugpy").Run(); err != nil {
+		t.Skip("debugpy not installed")
+	}
+
+	env := newE2EEnv(t)
+	scriptPath := filepath.Join(projectRoot(t), "testdata", "python", "simple.py")
+
+	// Debug with breakpoint at line 3
+	out, err := env.run("debug", scriptPath, "--break", scriptPath+":3")
+	if err != nil {
+		t.Fatalf("debug failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Stopped: breakpoint") {
+		t.Errorf("expected breakpoint stop, got:\n%s", out)
+	}
+
+	// Restart — should stop at the same breakpoint again
+	out, err = env.run("restart")
+	if err != nil {
+		t.Fatalf("restart failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Stopped: breakpoint") {
+		t.Errorf("expected breakpoint stop after restart, got:\n%s", out)
+	}
+	if !strings.Contains(out, ":3") {
+		t.Errorf("expected stop at line 3 after restart, got:\n%s", out)
+	}
+
+	// Stop
+	out, err = env.run("stop")
+	if err != nil {
+		t.Fatalf("stop failed: %v\n%s", err, out)
+	}
+}
+
 // --- Go tests ---
 
 // TestE2E_DebugGo runs a full Go debug session via dlv: debug → step → eval → continue → stop.
@@ -792,6 +1115,9 @@ func TestE2E_RemoteAttach_Python(t *testing.T) {
 
 // TestE2E_MultiSession verifies two independent sessions can run in parallel.
 func TestE2E_MultiSession(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping E2E test in short mode")
+	}
 	if err := exec.Command("python3", "-c", "import debugpy").Run(); err != nil {
 		t.Skip("debugpy not installed")
 	}
@@ -799,13 +1125,7 @@ func TestE2E_MultiSession(t *testing.T) {
 		t.Skip("dlv not installed")
 	}
 
-	// Build binary once
-	binary := filepath.Join(t.TempDir(), "dap")
-	build := exec.Command("go", "build", "-o", binary, "./cmd/dap")
-	build.Dir = projectRoot(t)
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build failed: %s\n%s", err, out)
-	}
+	binary := e2eBinary
 
 	tmpDir := t.TempDir()
 	socketA := filepath.Join(tmpDir, "a.sock")
@@ -917,17 +1237,13 @@ func TestE2E_MultiSession(t *testing.T) {
 
 // TestE2E_IdleTimeout verifies daemon exits after idle timeout.
 func TestE2E_IdleTimeout(t *testing.T) {
-	binary := filepath.Join(t.TempDir(), "dap")
-	build := exec.Command("go", "build", "-o", binary, "./cmd/dap")
-	build.Dir = projectRoot(t)
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build failed: %s\n%s", err, out)
+	if testing.Short() {
+		t.Skip("skipping E2E test in short mode")
 	}
-
 	socketPath := filepath.Join(t.TempDir(), "idle.sock")
 
 	// Start daemon with short idle timeout via env var
-	daemon := exec.Command(binary, "__daemon", "--socket", socketPath)
+	daemon := exec.Command(e2eBinary, "__daemon", "--socket", socketPath)
 	daemon.Env = append(os.Environ(), "DAP_IDLE_TIMEOUT=1s")
 	daemon.Stdout = os.Stderr
 	daemon.Stderr = os.Stderr

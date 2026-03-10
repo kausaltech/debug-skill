@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -31,9 +32,10 @@ func (b *breakpointFlag) Type() string { return "file:line[:condition]" }
 
 // globalFlags holds flags shared across commands.
 var globalFlags struct {
-	jsonOutput bool
-	socketPath string
-	session    string
+	jsonOutput   bool
+	socketPath   string
+	session      string
+	contextLines int
 }
 
 // NewRootCmd creates the cobra root command with all subcommands.
@@ -70,8 +72,13 @@ Sockets live at ~/.dap-cli/<session>.sock.
 Typical workflow:
   dap debug app.py --break app.py:42   # start, stop at breakpoint → auto-context
   dap eval "my_var"                    # inspect a value mid-session
+  dap inspect data --depth 2           # expand nested objects recursively
   dap step                             # step over → auto-context
   dap continue                         # run to next breakpoint → auto-context
+  dap continue --to app.py:50          # run to a specific line (temp breakpoint)
+  dap pause                            # interrupt a running program
+  dap threads                          # list all threads
+  dap restart                          # restart session with same arguments
   dap stop                             # kill session
 
 Best practices:
@@ -90,6 +97,7 @@ Best practices:
 	root.PersistentFlags().BoolVar(&globalFlags.jsonOutput, "json", false, "Output in JSON format")
 	root.PersistentFlags().StringVar(&globalFlags.socketPath, "socket", "", "Daemon socket path (overrides --session)")
 	root.PersistentFlags().StringVar(&globalFlags.session, "session", "default", "Session name (each session runs an independent daemon)")
+	root.PersistentFlags().IntVar(&globalFlags.contextLines, "context-lines", 0, "Number of source lines before/after current line (0 = default of 2)")
 
 	// Compute effective socket path: --socket overrides --session
 	root.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
@@ -104,9 +112,14 @@ Best practices:
 		newStopCmd(),
 		newStepCmd(),
 		newContinueCmd(),
+		newPauseCmd(),
 		newContextCmd(),
 		newEvalCmd(),
+		newInspectCmd(),
 		newOutputCmd(),
+		newThreadsCmd(),
+		newThreadCmd(),
+		newRestartCmd(),
 		newBreakCmd(),
 		newDaemonCmd(),
 	)
@@ -163,6 +176,7 @@ func newDebugCmd() *cobra.Command {
 	var (
 		breaks           breakpointFlag
 		attach           string
+		pid              int
 		backend          string
 		stopOnEntry      bool
 		exceptionFilters []string
@@ -188,11 +202,12 @@ Blocks until the program hits a breakpoint or exits, then returns auto-context.`
   dap debug server.js --break server.js:15
   dap debug hello.rs --stop-on-entry
   dap debug app.py -- --config prod.yaml --verbose
-  dap debug --attach localhost:5678 --backend debugpy --break handler.py:15`,
+  dap debug --attach localhost:5678 --backend debugpy --break handler.py:15
+  dap debug --pid 12345 --backend debugpy   # attach to running process`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) == 0 && attach == "" {
-				return fmt.Errorf("script path or --attach required")
+			if len(args) == 0 && attach == "" && pid == 0 {
+				return fmt.Errorf("script path, --attach, or --pid required")
 			}
 
 			socketPath, err := EnsureDaemon(globalFlags.socketPath)
@@ -204,8 +219,10 @@ Blocks until the program hits a breakpoint or exits, then returns auto-context.`
 				Breaks:           []Breakpoint(breaks),
 				StopOnEntry:      stopOnEntry,
 				Attach:           attach,
+				PID:              pid,
 				Backend:          backend,
 				ExceptionFilters: exceptionFilters,
+				ContextLines:     globalFlags.contextLines,
 			}
 			if len(args) > 0 {
 				debugArgs.Script = args[0]
@@ -234,6 +251,7 @@ Blocks until the program hits a breakpoint or exits, then returns auto-context.`
 
 	cmd.Flags().Var(&breaks, "break", "Add a breakpoint (repeatable: --break a.py:10 or --break \"a.py:10:x > 5\")")
 	cmd.Flags().StringVar(&attach, "attach", "", "Attach to remote debugger at host:port")
+	cmd.Flags().IntVar(&pid, "pid", 0, "Attach to a running process by PID (requires --backend)")
 	cmd.Flags().StringVar(&backend, "backend", "", "Debugger backend (debugpy, dlv, js-debug, lldb-dap); auto-detected from file extension")
 	cmd.Flags().BoolVar(&stopOnEntry, "stop-on-entry", false, "Stop at first line")
 	cmd.Flags().StringArrayVar(&exceptionFilters, "break-on-exception", nil,
@@ -302,6 +320,7 @@ Optionally update breakpoints before stepping (same flags as 'continue').`,
 			}
 			return runDaemonCommand("step", StepArgs{
 				Mode:              mode,
+				ContextLines:      globalFlags.contextLines,
 				BreakpointUpdates: breakpointUpdatesFromFlags(breaks, removeBreaks, exceptionFilters),
 			})
 		},
@@ -315,6 +334,7 @@ func newContinueCmd() *cobra.Command {
 		breaks           breakpointFlag
 		removeBreaks     breakpointFlag
 		exceptionFilters []string
+		continueTo       string
 	)
 
 	cmd := &cobra.Command{
@@ -327,16 +347,55 @@ If the program exits, prints "Program terminated" and the exit code.
 Optionally add or remove breakpoints before continuing:
   --break adds breakpoints (additive, merged with existing)
   --remove-break removes specific breakpoints
-  --break-on-exception adds exception breakpoint filters (merged with existing)`,
+  --break-on-exception adds exception breakpoint filters (merged with existing)
+  --to sets a temporary breakpoint (auto-removed after stop)`,
 		Example: `  dap continue
   dap continue --break app.py:42              # add a breakpoint and continue
   dap continue --break "app.py:42:x > 5"      # conditional breakpoint
   dap continue --remove-break app.py:10       # remove a breakpoint and continue
   dap continue --break-on-exception raised    # set exception breakpoints and continue
+  dap continue --to app.py:50                 # run to file:line (temp breakpoint)
   dap continue --session worker               # resume in a named session
   dap continue --json                         # machine-readable output`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runDaemonCommand("continue", ContinueArgs{
+			contArgs := ContinueArgs{
+				ContextLines:      globalFlags.contextLines,
+				BreakpointUpdates: breakpointUpdatesFromFlags(breaks, removeBreaks, exceptionFilters),
+			}
+			if continueTo != "" {
+				bp, err := parseBreakpointSpec(continueTo)
+				if err != nil {
+					return err
+				}
+				contArgs.ContinueTo = &bp
+			}
+			return runDaemonCommand("continue", contArgs)
+		},
+	}
+	cmd.Flags().StringVar(&continueTo, "to", "", "Run to file:line (temporary breakpoint, auto-removed after stop)")
+	addBreakpointFlags(cmd, &breaks, &removeBreaks, &exceptionFilters)
+	return cmd
+}
+
+func newPauseCmd() *cobra.Command {
+	var (
+		breaks           breakpointFlag
+		removeBreaks     breakpointFlag
+		exceptionFilters []string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "pause",
+		Short: "Pause a running program",
+		Long: `Pause a running program. Sends a pause request and returns immediately.
+The blocking command (continue/step/debug) that started execution will receive
+the stop event and return auto-context.
+
+Optionally update breakpoints before pausing (same flags as 'continue').`,
+		Example: `  dap pause
+  dap pause --break app.py:42   # add breakpoint, then pause`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runDaemonCommand("pause", PauseArgs{
 				BreakpointUpdates: breakpointUpdatesFromFlags(breaks, removeBreaks, exceptionFilters),
 			})
 		},
@@ -367,6 +426,7 @@ Optionally update breakpoints (same flags as 'continue').`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runDaemonCommand("context", ContextArgs{
 				Frame:             frame,
+				ContextLines:      globalFlags.contextLines,
 				BreakpointUpdates: breakpointUpdatesFromFlags(breaks, removeBreaks, exceptionFilters),
 			})
 		},
@@ -408,6 +468,36 @@ Optionally update breakpoints (same flags as 'continue').`,
 	return cmd
 }
 
+func newInspectCmd() *cobra.Command {
+	var (
+		depth int
+		frame int
+	)
+
+	cmd := &cobra.Command{
+		Use:   "inspect <variable>",
+		Short: "Inspect a variable (expand nested objects)",
+		Long: `Inspect a variable by name, recursively expanding nested objects.
+Searches local variables first, then all scopes (globals, etc.).
+Use --depth to control expansion depth (default 1, max 5).
+Use --frame to inspect in a parent stack frame.`,
+		Example: `  dap inspect data
+  dap inspect data --depth 2
+  dap inspect self --frame 1 --depth 3`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runDaemonCommand("inspect", InspectArgs{
+				Variable: args[0],
+				Depth:    depth,
+				Frame:    frame,
+			})
+		},
+	}
+	cmd.Flags().IntVar(&depth, "depth", 1, "Expansion depth (max 5)")
+	cmd.Flags().IntVar(&frame, "frame", 0, "Stack frame to inspect")
+	return cmd
+}
+
 func newOutputCmd() *cobra.Command {
 	var (
 		breaks           breakpointFlag
@@ -434,6 +524,56 @@ Optionally update breakpoints (same flags as 'continue').`,
 	}
 	addBreakpointFlags(cmd, &breaks, &removeBreaks, &exceptionFilters)
 	return cmd
+}
+
+func newThreadsCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "threads",
+		Short: "List all threads",
+		Long: `List all threads in the debugged program.
+The current thread is marked with *.`,
+		Example: `  dap threads
+  dap threads --json`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runDaemonCommand("threads", nil)
+		},
+	}
+}
+
+func newThreadCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "thread <id>",
+		Short: "Switch to a different thread",
+		Long: `Switch to a different thread by ID and return its context.
+Use 'dap threads' to list available thread IDs.`,
+		Example: `  dap thread 2
+  dap thread 1 --json`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			id, err := strconv.Atoi(args[0])
+			if err != nil {
+				return fmt.Errorf("invalid thread ID %q: must be a number", args[0])
+			}
+			return runDaemonCommand("thread", ThreadArgs{
+				ThreadID:     id,
+				ContextLines: globalFlags.contextLines,
+			})
+		},
+	}
+}
+
+func newRestartCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "restart",
+		Short: "Restart the debug session with the same arguments",
+		Long: `Restart the debug session using the same arguments as the last 'dap debug' call.
+Kills the current session and starts a new one.`,
+		Example: `  dap restart
+  dap restart --json`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runDaemonCommand("restart", nil)
+		},
+	}
 }
 
 func newBreakCmd() *cobra.Command {

@@ -264,6 +264,36 @@ func TestRequireSession(t *testing.T) {
 	}
 }
 
+func TestHandleThreadsNoSession(t *testing.T) {
+	d := &Daemon{}
+	resp := d.handleThreads()
+	if resp.Status != "error" {
+		t.Errorf("expected error status, got %q", resp.Status)
+	}
+}
+
+func TestHandleRestartNoArgs(t *testing.T) {
+	d := &Daemon{}
+	resp := d.handleRestart()
+	if resp.Status != "error" {
+		t.Errorf("expected error status, got %q", resp.Status)
+	}
+	if !strings.Contains(resp.Error, "no previous debug session") {
+		t.Errorf("expected 'no previous debug session', got %q", resp.Error)
+	}
+}
+
+func TestHandlePauseNoSession(t *testing.T) {
+	d := &Daemon{}
+	resp := d.handlePause(nil)
+	if resp.Status != "error" {
+		t.Errorf("expected error status, got %q", resp.Status)
+	}
+	if !strings.Contains(resp.Error, "no active debug session") {
+		t.Errorf("expected 'no active debug session' in error, got %q", resp.Error)
+	}
+}
+
 func TestMalformedJSONArgs(t *testing.T) {
 	d := &Daemon{}
 	// Set a fake client so requireSession passes
@@ -278,6 +308,9 @@ func TestMalformedJSONArgs(t *testing.T) {
 		{"handleStep", d.handleStep},
 		{"handleContinue", d.handleContinue},
 		{"handleContext", d.handleContext},
+		{"handlePause", d.handlePause},
+		{"handleInspect", d.handleInspect},
+		{"handleThread", d.handleThread},
 	}
 
 	for _, tt := range tests {
