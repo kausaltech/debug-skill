@@ -728,6 +728,77 @@ func TestE2E_ContextLines(t *testing.T) {
 	}
 }
 
+// TestE2E_Threads tests the threads command.
+func TestE2E_Threads(t *testing.T) {
+	if err := exec.Command("python3", "-c", "import debugpy").Run(); err != nil {
+		t.Skip("debugpy not installed")
+	}
+
+	env := newE2EEnv(t)
+	scriptPath := filepath.Join(projectRoot(t), "testdata", "python", "simple.py")
+
+	// Debug with breakpoint
+	out, err := env.run("debug", scriptPath, "--break", scriptPath+":2")
+	if err != nil {
+		t.Fatalf("debug failed: %v\n%s", err, out)
+	}
+
+	// List threads
+	out, err = env.run("threads")
+	if err != nil {
+		t.Fatalf("threads failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Threads:") {
+		t.Errorf("expected Threads header, got:\n%s", out)
+	}
+	if !strings.Contains(out, "*") {
+		t.Errorf("expected current thread marker, got:\n%s", out)
+	}
+
+	// Stop
+	out, err = env.run("stop")
+	if err != nil {
+		t.Fatalf("stop failed: %v\n%s", err, out)
+	}
+}
+
+// TestE2E_Restart tests the restart command.
+func TestE2E_Restart(t *testing.T) {
+	if err := exec.Command("python3", "-c", "import debugpy").Run(); err != nil {
+		t.Skip("debugpy not installed")
+	}
+
+	env := newE2EEnv(t)
+	scriptPath := filepath.Join(projectRoot(t), "testdata", "python", "simple.py")
+
+	// Debug with breakpoint at line 3
+	out, err := env.run("debug", scriptPath, "--break", scriptPath+":3")
+	if err != nil {
+		t.Fatalf("debug failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Stopped: breakpoint") {
+		t.Errorf("expected breakpoint stop, got:\n%s", out)
+	}
+
+	// Restart — should stop at the same breakpoint again
+	out, err = env.run("restart")
+	if err != nil {
+		t.Fatalf("restart failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Stopped: breakpoint") {
+		t.Errorf("expected breakpoint stop after restart, got:\n%s", out)
+	}
+	if !strings.Contains(out, ":3") {
+		t.Errorf("expected stop at line 3 after restart, got:\n%s", out)
+	}
+
+	// Stop
+	out, err = env.run("stop")
+	if err != nil {
+		t.Fatalf("stop failed: %v\n%s", err, out)
+	}
+}
+
 // --- Go tests ---
 
 // TestE2E_DebugGo runs a full Go debug session via dlv: debug → step → eval → continue → stop.

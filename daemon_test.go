@@ -264,6 +264,25 @@ func TestRequireSession(t *testing.T) {
 	}
 }
 
+func TestHandleThreadsNoSession(t *testing.T) {
+	d := &Daemon{}
+	resp := d.handleThreads()
+	if resp.Status != "error" {
+		t.Errorf("expected error status, got %q", resp.Status)
+	}
+}
+
+func TestHandleRestartNoArgs(t *testing.T) {
+	d := &Daemon{}
+	resp := d.handleRestart()
+	if resp.Status != "error" {
+		t.Errorf("expected error status, got %q", resp.Status)
+	}
+	if !strings.Contains(resp.Error, "no previous debug session") {
+		t.Errorf("expected 'no previous debug session', got %q", resp.Error)
+	}
+}
+
 func TestHandlePauseNoSession(t *testing.T) {
 	d := &Daemon{}
 	resp := d.handlePause(nil)

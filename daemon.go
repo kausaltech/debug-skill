@@ -67,6 +67,9 @@ type Daemon struct {
 	// Cleanup function for temp binaries (e.g. Go, Rust compilation)
 	cleanupFn func()
 
+	// Last debug args for restart
+	lastDebugArgs json.RawMessage
+
 	// Adapter address and config for child session creation (js-debug multi-session)
 	adapterAddr string
 	// sessionBreaks and sessionExceptionFilters are only accessed from handler methods
@@ -464,6 +467,12 @@ func (d *Daemon) dispatchCommand(req Request) *Response {
 		return d.handleBreakClear()
 	case "pause":
 		return d.handlePause(req.Args)
+	case "threads":
+		return d.handleThreads()
+	case "thread":
+		return d.handleThread(req.Args)
+	case "restart":
+		return d.handleRestart()
 	case "stop":
 		return d.handleStop()
 	case "ping":
@@ -479,6 +488,9 @@ func (d *Daemon) handleDebug(rawArgs json.RawMessage) *Response {
 		return errResponsef("invalid args: %v", err)
 	}
 
+	// Store raw args for restart
+	d.lastDebugArgs = rawArgs
+
 	// Select backend
 	var backend Backend
 	if args.Backend != "" {
@@ -491,15 +503,36 @@ func (d *Daemon) handleDebug(rawArgs json.RawMessage) *Response {
 		backend = DetectBackend(args.Script)
 	} else if args.Attach != "" {
 		return errResponse("backend required for remote attach (e.g. --backend debugpy)")
+	} else if args.PID > 0 {
+		return errResponse("backend required for PID attach (e.g. --backend debugpy)")
 	} else {
-		return errResponse("script path or --attach required")
+		return errResponse("script path, --attach, or --pid required")
 	}
 	d.backend = backend
 	d.stopSession() // clean up any previous session
 
 	isRemote := args.Attach != ""
+	isPID := args.PID > 0
 
-	if isRemote {
+	if isPID {
+		// PID attach: spawn local adapter, connect, initialize, then attach with PID args
+		if err := d.startAdapter(backend); err != nil {
+			return errResponse(err.Error())
+		}
+		if err := d.initializeDAP(backend); err != nil {
+			return errResponse(err.Error())
+		}
+
+		pidArgs, err := backend.PIDAttachArgs(args.PID)
+		if err != nil {
+			d.stopSession()
+			return errResponsef("preparing PID attach: %v", err)
+		}
+		if err := d.client.AttachRequestWithArgs(pidArgs); err != nil {
+			d.stopSession()
+			return errResponsef("PID attach: %v", err)
+		}
+	} else if isRemote {
 		// Connect directly to the remote DAP server
 		client, err := newDAPClient(args.Attach)
 		if err != nil {
@@ -581,7 +614,7 @@ func (d *Daemon) handleDebug(rawArgs json.RawMessage) *Response {
 
 	// Send all config requests without waiting for individual responses.
 	// DAP is async — responses will be consumed by waitForStopped below.
-	stopOnEntry := !isRemote && (args.StopOnEntry || len(args.Breaks) == 0)
+	stopOnEntry := !isRemote && !isPID && (args.StopOnEntry || len(args.Breaks) == 0)
 	entryBP := backend.StopOnEntryBreakpoint()
 	if stopOnEntry && entryBP != "" {
 		if err := d.client.SetFunctionBreakpointsRequest([]string{entryBP}); err != nil {
@@ -1091,6 +1124,69 @@ func (d *Daemon) handleBreakClear() *Response {
 	}
 
 	return &Response{Status: "ok"}
+}
+
+func (d *Daemon) handleThreads() *Response {
+	if resp := d.requireSession(); resp != nil {
+		return resp
+	}
+
+	if err := d.client.ThreadsRequest(); err != nil {
+		return errResponsef("threads request: %v", err)
+	}
+
+	for {
+		msg, err := d.readExpected()
+		if err != nil {
+			return errResponsef("reading threads: %v", err)
+		}
+		if resp, ok := msg.(*godap.ThreadsResponse); ok {
+			if !resp.Success {
+				return errResponsef("threads failed: %s", resp.Message)
+			}
+			threads := make([]ThreadInfo, len(resp.Body.Threads))
+			for i, t := range resp.Body.Threads {
+				threads[i] = ThreadInfo{
+					ID:      t.Id,
+					Name:    t.Name,
+					Current: t.Id == d.threadID,
+				}
+			}
+			return &Response{Status: "ok", Data: &ContextResult{Threads: threads, IsThreadList: true}}
+		}
+		if _, ok := msg.(*godap.ErrorResponse); ok {
+			return errResponse("threads request failed")
+		}
+	}
+}
+
+func (d *Daemon) handleThread(rawArgs json.RawMessage) *Response {
+	if resp := d.requireSession(); resp != nil {
+		return resp
+	}
+
+	var args ThreadArgs
+	if err := json.Unmarshal(rawArgs, &args); err != nil {
+		return errResponsef("invalid args: %v", err)
+	}
+	if args.ThreadID == 0 {
+		return errResponse("thread ID required")
+	}
+
+	d.threadID = args.ThreadID
+	ctx, err := getFullContext(d, d.threadID, 0, args.ContextLines)
+	if err != nil {
+		return errResponse(err.Error())
+	}
+	return &Response{Status: "stopped", Data: ctx}
+}
+
+func (d *Daemon) handleRestart() *Response {
+	if d.lastDebugArgs == nil {
+		return errResponse("no previous debug session to restart — run 'dap debug' first")
+	}
+	d.stopSession()
+	return d.handleDebug(d.lastDebugArgs)
 }
 
 func (d *Daemon) handleStop() *Response {

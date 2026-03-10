@@ -63,6 +63,10 @@ type ContextResult struct {
 	// Warnings from unverified breakpoints (drained on each response)
 	Warnings []string `json:"warnings,omitempty"`
 
+	// Thread list results
+	Threads      []ThreadInfo `json:"threads,omitempty"`
+	IsThreadList bool         `json:"is_thread_list,omitempty"`
+
 	// Break list results
 	Breakpoints      []Breakpoint `json:"breakpoints,omitempty"`
 	ExceptionFilters []string     `json:"exception_filters,omitempty"`
@@ -121,6 +125,7 @@ type DebugArgs struct {
 	Breaks           []Breakpoint `json:"breaks,omitempty"`
 	StopOnEntry      bool         `json:"stop_on_entry,omitempty"`
 	Attach           string       `json:"attach,omitempty"` // "host:port" for remote
+	PID              int          `json:"pid,omitempty"`    // PID for local attach
 	ProgramArgs      []string     `json:"program_args,omitempty"`
 	ExceptionFilters []string     `json:"exception_filters,omitempty"` // backend-specific filter IDs
 	ContextLines     int          `json:"context_lines,omitempty"`
@@ -164,6 +169,19 @@ type ContextArgs struct {
 // OutputArgs are arguments for the "output" command.
 type OutputArgs struct {
 	BreakpointUpdates
+}
+
+// ThreadInfo represents a thread in the debugged program.
+type ThreadInfo struct {
+	ID      int    `json:"id"`
+	Name    string `json:"name"`
+	Current bool   `json:"current,omitempty"`
+}
+
+// ThreadArgs are arguments for the "thread" command.
+type ThreadArgs struct {
+	ThreadID     int `json:"thread_id"`
+	ContextLines int `json:"context_lines,omitempty"`
 }
 
 // InspectArgs are arguments for the "inspect" command.

@@ -14,6 +14,19 @@ func FormatText(r *ContextResult) string {
 
 	var b strings.Builder
 
+	// Thread list result (special case)
+	if r.IsThreadList {
+		b.WriteString("Threads:\n")
+		for _, t := range r.Threads {
+			marker := "  "
+			if t.Current {
+				marker = "* "
+			}
+			fmt.Fprintf(&b, "  %s#%d %s\n", marker, t.ID, t.Name)
+		}
+		return b.String()
+	}
+
 	// Break list result (special case)
 	if r.IsBreakList {
 		if len(r.Breakpoints) > 0 {

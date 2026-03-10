@@ -118,6 +118,26 @@ func TestFormatText_ExceptionInfoWithDetails(t *testing.T) {
 	}
 }
 
+func TestFormatText_ThreadList(t *testing.T) {
+	result := &ContextResult{
+		IsThreadList: true,
+		Threads: []ThreadInfo{
+			{ID: 1, Name: "MainThread", Current: true},
+			{ID: 2, Name: "Thread-1"},
+		},
+	}
+	text := FormatText(result)
+	if !strings.Contains(text, "Threads:") {
+		t.Errorf("expected Threads header, got:\n%s", text)
+	}
+	if !strings.Contains(text, "* #1 MainThread") {
+		t.Errorf("expected current thread marker, got:\n%s", text)
+	}
+	if !strings.Contains(text, "  #2 Thread-1") {
+		t.Errorf("expected non-current thread, got:\n%s", text)
+	}
+}
+
 func TestFormatText_InspectResult(t *testing.T) {
 	result := &ContextResult{
 		InspectResult: &InspectResult{
