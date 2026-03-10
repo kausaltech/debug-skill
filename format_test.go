@@ -118,6 +118,36 @@ func TestFormatText_ExceptionInfoWithDetails(t *testing.T) {
 	}
 }
 
+func TestFormatText_InspectResult(t *testing.T) {
+	result := &ContextResult{
+		InspectResult: &InspectResult{
+			Name:  "data",
+			Type:  "dict",
+			Value: `{'key': {'nested': 1}}`,
+			Children: []InspectResult{
+				{
+					Name:  "key",
+					Type:  "dict",
+					Value: `{'nested': 1}`,
+					Children: []InspectResult{
+						{Name: "nested", Type: "int", Value: "1"},
+					},
+				},
+			},
+		},
+	}
+	text := FormatText(result)
+	if !strings.Contains(text, "data (dict) =") {
+		t.Errorf("expected data header, got:\n%s", text)
+	}
+	if !strings.Contains(text, "  key (dict) =") {
+		t.Errorf("expected indented key, got:\n%s", text)
+	}
+	if !strings.Contains(text, "    nested (int) = 1") {
+		t.Errorf("expected double-indented nested, got:\n%s", text)
+	}
+}
+
 func TestFormatResponse_Terminated(t *testing.T) {
 	exitCode := 0
 	resp := &Response{

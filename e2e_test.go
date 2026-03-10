@@ -655,6 +655,79 @@ func TestE2E_ExceptionInfo(t *testing.T) {
 	}
 }
 
+// TestE2E_Inspect tests the inspect command with nested variables.
+func TestE2E_Inspect(t *testing.T) {
+	if err := exec.Command("python3", "-c", "import debugpy").Run(); err != nil {
+		t.Skip("debugpy not installed")
+	}
+
+	env := newE2EEnv(t)
+	scriptPath := filepath.Join(projectRoot(t), "testdata", "python", "nested.py")
+
+	// Debug with breakpoint at line 2 (after data is defined)
+	out, err := env.run("debug", scriptPath, "--break", scriptPath+":2")
+	if err != nil {
+		t.Fatalf("debug failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Stopped: breakpoint") {
+		t.Errorf("expected breakpoint stop, got:\n%s", out)
+	}
+
+	// Inspect data at depth 2
+	out, err = env.run("inspect", "data", "--depth", "2")
+	if err != nil {
+		t.Fatalf("inspect failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "data") {
+		t.Errorf("expected data in inspect output, got:\n%s", out)
+	}
+	// Should have children (key, flat)
+	if !strings.Contains(out, "key") {
+		t.Errorf("expected 'key' child in inspect output, got:\n%s", out)
+	}
+
+	// Stop
+	out, err = env.run("stop")
+	if err != nil {
+		t.Fatalf("stop failed: %v\n%s", err, out)
+	}
+}
+
+// TestE2E_ContextLines tests --context-lines flag.
+func TestE2E_ContextLines(t *testing.T) {
+	if err := exec.Command("python3", "-c", "import debugpy").Run(); err != nil {
+		t.Skip("debugpy not installed")
+	}
+
+	env := newE2EEnv(t)
+	scriptPath := filepath.Join(projectRoot(t), "testdata", "python", "simple.py")
+
+	// Debug with breakpoint at line 2
+	out, err := env.run("debug", scriptPath, "--break", scriptPath+":2")
+	if err != nil {
+		t.Fatalf("debug failed: %v\n%s", err, out)
+	}
+
+	// context --context-lines 5 should show more source lines
+	out, err = env.run("context", "--context-lines", "5")
+	if err != nil {
+		t.Fatalf("context --context-lines failed: %v\n%s", err, out)
+	}
+	// simple.py has 4 lines. With context=5 around line 2, we should see all lines.
+	if !strings.Contains(out, "x = 1") {
+		t.Errorf("expected 'x = 1' in context output, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Result:") {
+		t.Errorf("expected 'Result:' in wider context output, got:\n%s", out)
+	}
+
+	// Stop
+	out, err = env.run("stop")
+	if err != nil {
+		t.Fatalf("stop failed: %v\n%s", err, out)
+	}
+}
+
 // --- Go tests ---
 
 // TestE2E_DebugGo runs a full Go debug session via dlv: debug → step → eval → continue → stop.

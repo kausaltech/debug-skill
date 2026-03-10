@@ -305,7 +305,8 @@ func (d *Daemon) readLoop() {
 
 // waitForStopped waits for a StoppedEvent or TerminatedEvent, skipping responses and other events.
 // ExitedEvent → captures exit code, continues waiting for TerminatedEvent.
-func (d *Daemon) waitForStopped() (*ContextResult, error) {
+// contextLines overrides the default source context window; 0 means use default.
+func (d *Daemon) waitForStopped(contextLines int) (*ContextResult, error) {
 	var exitCode *int
 	for {
 		msg, err := d.readExpected()
@@ -315,7 +316,7 @@ func (d *Daemon) waitForStopped() (*ContextResult, error) {
 		switch m := msg.(type) {
 		case *godap.StoppedEvent:
 			d.threadID = resolveThreadID(m.Body.ThreadId)
-			ctx, err := getFullContext(d, d.threadID, 0)
+			ctx, err := getFullContext(d, d.threadID, 0, contextLines)
 			if err != nil {
 				return nil, fmt.Errorf("getting context: %w", err)
 			}
@@ -449,6 +450,8 @@ func (d *Daemon) dispatchCommand(req Request) *Response {
 		return d.handleContext(req.Args)
 	case "eval":
 		return d.handleEval(req.Args)
+	case "inspect":
+		return d.handleInspect(req.Args)
 	case "output":
 		return d.handleOutput(req.Args)
 	case "break_list":
@@ -611,7 +614,7 @@ func (d *Daemon) handleDebug(rawArgs json.RawMessage) *Response {
 
 	// Wait for first stop. If we get an "entry" stop and have breakpoints, continue past it.
 	for {
-		ctx, err := d.waitForStopped()
+		ctx, err := d.waitForStopped(args.ContextLines)
 		if err != nil {
 			d.stopSession()
 			return errResponse(err.Error())
@@ -700,7 +703,7 @@ func (d *Daemon) handleStep(rawArgs json.RawMessage) *Response {
 		return errResponsef("invalid step mode %q — use: in, out, over", args.Mode)
 	}
 
-	return d.awaitStopResult()
+	return d.awaitStopResult(args.ContextLines)
 }
 
 func (d *Daemon) handleContinue(rawArgs json.RawMessage) *Response {
@@ -732,7 +735,7 @@ func (d *Daemon) handleContinue(rawArgs json.RawMessage) *Response {
 		return errResponsef("continue: %v", err)
 	}
 
-	resp := d.awaitStopResult()
+	resp := d.awaitStopResult(args.ContextLines)
 
 	// --to: remove temp breakpoint after stop (whether stopped or terminated)
 	if args.ContinueTo != nil {
@@ -769,7 +772,7 @@ func (d *Daemon) handlePause(rawArgs json.RawMessage) *Response {
 		return errResponsef("pause: %v", err)
 	}
 
-	return d.awaitStopResult()
+	return d.awaitStopResult(args.ContextLines)
 }
 
 func (d *Daemon) handleContext(rawArgs json.RawMessage) *Response {
@@ -790,11 +793,114 @@ func (d *Daemon) handleContext(rawArgs json.RawMessage) *Response {
 
 	threadID := resolveThreadID(d.threadID)
 
-	ctx, err := getFullContext(d, threadID, args.Frame)
+	ctx, err := getFullContext(d, threadID, args.Frame, args.ContextLines)
 	if err != nil {
 		return errResponse(err.Error())
 	}
 	return &Response{Status: "stopped", Data: ctx}
+}
+
+func (d *Daemon) handleInspect(rawArgs json.RawMessage) *Response {
+	if resp := d.requireSession(); resp != nil {
+		return resp
+	}
+
+	var args InspectArgs
+	if err := json.Unmarshal(rawArgs, &args); err != nil {
+		return errResponsef("invalid args: %v", err)
+	}
+	if args.Variable == "" {
+		return errResponse("variable name required")
+	}
+	if args.Depth <= 0 {
+		args.Depth = 1
+	}
+	if args.Depth > 5 {
+		args.Depth = 5
+	}
+
+	// Resolve target frame
+	frameID := d.frameID
+	if args.Frame > 0 {
+		if args.Frame >= len(d.frameIDs) {
+			return errResponsef("frame %d out of range (stack has %d frames)", args.Frame, len(d.frameIDs))
+		}
+		frameID = d.frameIDs[args.Frame]
+	}
+
+	// Get scopes
+	if err := d.client.ScopesRequest(frameID); err != nil {
+		return errResponsef("scopes request: %v", err)
+	}
+
+	var scopes []godap.Scope
+	for {
+		msg, err := d.readExpected()
+		if err != nil {
+			return errResponsef("reading scopes: %v", err)
+		}
+		if resp, ok := msg.(*godap.ScopesResponse); ok {
+			scopes = resp.Body.Scopes
+			break
+		}
+		if _, ok := msg.(*godap.ErrorResponse); ok {
+			break
+		}
+	}
+
+	// Search for the variable in locals/arguments scopes
+	for _, scope := range scopes {
+		name := strings.ToLower(scope.Name)
+		if scope.VariablesReference == 0 {
+			continue
+		}
+		if !strings.Contains(name, "local") && !strings.Contains(name, "argument") &&
+			name != "locals" && name != "arguments" {
+			continue
+		}
+
+		if err := d.client.VariablesRequest(scope.VariablesReference); err != nil {
+			continue
+		}
+
+		for {
+			msg, err := d.readExpected()
+			if err != nil {
+				break
+			}
+			if _, ok := msg.(*godap.ErrorResponse); ok {
+				break
+			}
+			resp, ok := msg.(*godap.VariablesResponse)
+			if !ok {
+				continue
+			}
+			if !resp.Success {
+				break
+			}
+
+			for _, v := range resp.Body.Variables {
+				if v.Name == args.Variable {
+					nodeCount := 1
+					result := InspectResult{
+						Name:  v.Name,
+						Type:  v.Type,
+						Value: truncateString(v.Value, maxStringLen),
+					}
+					if v.VariablesReference > 0 {
+						result.Children = expandVariable(d, v.VariablesReference, 0, args.Depth, &nodeCount, 100)
+					}
+					return &Response{
+						Status: "ok",
+						Data:   &ContextResult{InspectResult: &result},
+					}
+				}
+			}
+			break
+		}
+	}
+
+	return errResponsef("variable %q not found in current scope", args.Variable)
 }
 
 func (d *Daemon) handleEval(rawArgs json.RawMessage) *Response {
@@ -1151,9 +1257,9 @@ func resolveThreadID(threadID int) int {
 }
 
 // awaitStopResult calls waitForStopped and returns an appropriate response.
-// Used by handleStep and handleContinue.
-func (d *Daemon) awaitStopResult() *Response {
-	ctx, err := d.waitForStopped()
+// Used by handleStep, handleContinue, and handlePause.
+func (d *Daemon) awaitStopResult(contextLines int) *Response {
+	ctx, err := d.waitForStopped(contextLines)
 	if err != nil {
 		return errResponse(err.Error())
 	}

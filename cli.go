@@ -31,9 +31,10 @@ func (b *breakpointFlag) Type() string { return "file:line[:condition]" }
 
 // globalFlags holds flags shared across commands.
 var globalFlags struct {
-	jsonOutput bool
-	socketPath string
-	session    string
+	jsonOutput   bool
+	socketPath   string
+	session      string
+	contextLines int
 }
 
 // NewRootCmd creates the cobra root command with all subcommands.
@@ -90,6 +91,7 @@ Best practices:
 	root.PersistentFlags().BoolVar(&globalFlags.jsonOutput, "json", false, "Output in JSON format")
 	root.PersistentFlags().StringVar(&globalFlags.socketPath, "socket", "", "Daemon socket path (overrides --session)")
 	root.PersistentFlags().StringVar(&globalFlags.session, "session", "default", "Session name (each session runs an independent daemon)")
+	root.PersistentFlags().IntVar(&globalFlags.contextLines, "context-lines", 0, "Number of source lines before/after current line (default: 2)")
 
 	// Compute effective socket path: --socket overrides --session
 	root.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
@@ -107,6 +109,7 @@ Best practices:
 		newPauseCmd(),
 		newContextCmd(),
 		newEvalCmd(),
+		newInspectCmd(),
 		newOutputCmd(),
 		newBreakCmd(),
 		newDaemonCmd(),
@@ -207,6 +210,7 @@ Blocks until the program hits a breakpoint or exits, then returns auto-context.`
 				Attach:           attach,
 				Backend:          backend,
 				ExceptionFilters: exceptionFilters,
+				ContextLines:     globalFlags.contextLines,
 			}
 			if len(args) > 0 {
 				debugArgs.Script = args[0]
@@ -303,6 +307,7 @@ Optionally update breakpoints before stepping (same flags as 'continue').`,
 			}
 			return runDaemonCommand("step", StepArgs{
 				Mode:              mode,
+				ContextLines:      globalFlags.contextLines,
 				BreakpointUpdates: breakpointUpdatesFromFlags(breaks, removeBreaks, exceptionFilters),
 			})
 		},
@@ -341,6 +346,7 @@ Optionally add or remove breakpoints before continuing:
   dap continue --json                         # machine-readable output`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			contArgs := ContinueArgs{
+				ContextLines:      globalFlags.contextLines,
 				BreakpointUpdates: breakpointUpdatesFromFlags(breaks, removeBreaks, exceptionFilters),
 			}
 			if continueTo != "" {
@@ -376,6 +382,7 @@ Optionally update breakpoints before pausing (same flags as 'continue').`,
   dap pause --break app.py:42   # add breakpoint, then pause`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runDaemonCommand("pause", PauseArgs{
+				ContextLines:      globalFlags.contextLines,
 				BreakpointUpdates: breakpointUpdatesFromFlags(breaks, removeBreaks, exceptionFilters),
 			})
 		},
@@ -406,6 +413,7 @@ Optionally update breakpoints (same flags as 'continue').`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runDaemonCommand("context", ContextArgs{
 				Frame:             frame,
+				ContextLines:      globalFlags.contextLines,
 				BreakpointUpdates: breakpointUpdatesFromFlags(breaks, removeBreaks, exceptionFilters),
 			})
 		},
@@ -438,12 +446,42 @@ Optionally update breakpoints (same flags as 'continue').`,
 			return runDaemonCommand("eval", EvalArgs{
 				Expression:        args[0],
 				Frame:             frame,
+				ContextLines:      globalFlags.contextLines,
 				BreakpointUpdates: breakpointUpdatesFromFlags(breaks, removeBreaks, exceptionFilters),
 			})
 		},
 	}
 	cmd.Flags().IntVar(&frame, "frame", 0, "Stack frame for evaluation context")
 	addBreakpointFlags(cmd, &breaks, &removeBreaks, &exceptionFilters)
+	return cmd
+}
+
+func newInspectCmd() *cobra.Command {
+	var (
+		depth int
+		frame int
+	)
+
+	cmd := &cobra.Command{
+		Use:   "inspect <variable>",
+		Short: "Inspect a variable (expand nested objects)",
+		Long: `Inspect a variable by name, recursively expanding nested objects.
+Use --depth to control expansion depth (default 1, max 5).
+Use --frame to inspect in a parent stack frame.`,
+		Example: `  dap inspect data
+  dap inspect data --depth 2
+  dap inspect self --frame 1 --depth 3`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runDaemonCommand("inspect", InspectArgs{
+				Variable: args[0],
+				Depth:    depth,
+				Frame:    frame,
+			})
+		},
+	}
+	cmd.Flags().IntVar(&depth, "depth", 1, "Expansion depth (max 5)")
+	cmd.Flags().IntVar(&frame, "frame", 0, "Stack frame to inspect")
 	return cmd
 }
 

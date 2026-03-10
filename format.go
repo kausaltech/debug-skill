@@ -35,6 +35,12 @@ func FormatText(r *ContextResult) string {
 		return b.String()
 	}
 
+	// Inspect result (special case)
+	if r.InspectResult != nil {
+		formatInspectTree(&b, r.InspectResult, 0)
+		return b.String()
+	}
+
 	// Eval result (special case)
 	if r.EvalResult != nil {
 		if r.EvalResult.Type != "" {
@@ -124,6 +130,19 @@ func FormatText(r *ContextResult) string {
 	}
 
 	return b.String()
+}
+
+// formatInspectTree renders an InspectResult tree with indentation.
+func formatInspectTree(b *strings.Builder, r *InspectResult, indent int) {
+	prefix := strings.Repeat("  ", indent)
+	if r.Type != "" {
+		fmt.Fprintf(b, "%s%s (%s) = %s\n", prefix, r.Name, r.Type, r.Value)
+	} else {
+		fmt.Fprintf(b, "%s%s = %s\n", prefix, r.Name, r.Value)
+	}
+	for i := range r.Children {
+		formatInspectTree(b, &r.Children[i], indent+1)
+	}
 }
 
 // FormatJSON formats a ContextResult as JSON.

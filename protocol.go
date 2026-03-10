@@ -58,6 +58,7 @@ type ContextResult struct {
 	ExitCode      *int           `json:"exit_code,omitempty"`
 	EvalResult    *EvalResult    `json:"eval_result,omitempty"`
 	ExceptionInfo *ExceptionInfo `json:"exception_info,omitempty"`
+	InspectResult *InspectResult `json:"inspect_result,omitempty"`
 
 	// Warnings from unverified breakpoints (drained on each response)
 	Warnings []string `json:"warnings,omitempty"`
@@ -122,41 +123,62 @@ type DebugArgs struct {
 	Attach           string       `json:"attach,omitempty"` // "host:port" for remote
 	ProgramArgs      []string     `json:"program_args,omitempty"`
 	ExceptionFilters []string     `json:"exception_filters,omitempty"` // backend-specific filter IDs
+	ContextLines     int          `json:"context_lines,omitempty"`
 }
 
 // StepArgs are arguments for the "step" command.
 type StepArgs struct {
-	Mode string `json:"mode"` // "over", "in", "out"
+	Mode         string `json:"mode"` // "over", "in", "out"
+	ContextLines int    `json:"context_lines,omitempty"`
 	BreakpointUpdates
 }
 
 // PauseArgs are arguments for the "pause" command.
 type PauseArgs struct {
+	ContextLines int `json:"context_lines,omitempty"`
 	BreakpointUpdates
 }
 
 // ContinueArgs are arguments for the "continue" command.
 type ContinueArgs struct {
-	ContinueTo *Breakpoint `json:"continue_to,omitempty"`
+	ContinueTo   *Breakpoint `json:"continue_to,omitempty"`
+	ContextLines int         `json:"context_lines,omitempty"`
 	BreakpointUpdates
 }
 
 // EvalArgs are arguments for the "eval" command.
 type EvalArgs struct {
-	Expression string `json:"expression"`
-	Frame      int    `json:"frame,omitempty"`
+	Expression   string `json:"expression"`
+	Frame        int    `json:"frame,omitempty"`
+	ContextLines int    `json:"context_lines,omitempty"`
 	BreakpointUpdates
 }
 
 // ContextArgs are arguments for the "context" command.
 type ContextArgs struct {
-	Frame int `json:"frame,omitempty"`
+	Frame        int `json:"frame,omitempty"`
+	ContextLines int `json:"context_lines,omitempty"`
 	BreakpointUpdates
 }
 
 // OutputArgs are arguments for the "output" command.
 type OutputArgs struct {
 	BreakpointUpdates
+}
+
+// InspectArgs are arguments for the "inspect" command.
+type InspectArgs struct {
+	Variable string `json:"variable"`
+	Depth    int    `json:"depth,omitempty"` // default 1, max 5
+	Frame    int    `json:"frame,omitempty"`
+}
+
+// InspectResult holds the result of an inspect command.
+type InspectResult struct {
+	Name     string          `json:"name"`
+	Type     string          `json:"type,omitempty"`
+	Value    string          `json:"value"`
+	Children []InspectResult `json:"children,omitempty"`
 }
 
 // BreakAddArgs are arguments for the "break_add" command.

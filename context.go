@@ -37,7 +37,8 @@ var variableFilters = map[string]func(string) bool{
 
 // getFullContext aggregates stack, source, locals, and output into a ContextResult.
 // It also updates d.frameID with the target frame for subsequent eval calls.
-func getFullContext(d *Daemon, threadID, frameID int) (*ContextResult, error) {
+// contextLines overrides the default source context window; 0 means use default.
+func getFullContext(d *Daemon, threadID, frameID, contextLines int) (*ContextResult, error) {
 	result := &ContextResult{}
 
 	// 1. Get stack trace
@@ -90,8 +91,12 @@ func getFullContext(d *Daemon, threadID, frameID int) (*ContextResult, error) {
 	}
 
 	// 3. Read source file around current line
+	ctxLines := sourceContext
+	if contextLines > 0 {
+		ctxLines = contextLines
+	}
 	if result.Location != nil && result.Location.File != "" {
-		result.Source = readSourceLines(result.Location.File, result.Location.Line, sourceContext)
+		result.Source = readSourceLines(result.Location.File, result.Location.Line, ctxLines)
 	}
 
 	// 4. Get scopes and variables for target frame
@@ -213,6 +218,61 @@ func truncateString(s string, maxLen int) string {
 		return s
 	}
 	return string(runes[:maxLen]) + "..."
+}
+
+// expandVariable recursively fetches child variables up to maxDepth.
+// nodeCount tracks total nodes to prevent runaway expansion (capped at maxNodes).
+func expandVariable(d *Daemon, varRef int, depth, maxDepth int, nodeCount *int, maxNodes int) []InspectResult {
+	if depth >= maxDepth || varRef == 0 || *nodeCount >= maxNodes {
+		return nil
+	}
+
+	if err := d.client.VariablesRequest(varRef); err != nil {
+		return nil
+	}
+
+	var filterVar func(string) bool
+	if d.backend != nil {
+		filterVar = variableFilters[d.backend.AdapterID()]
+	}
+
+	for {
+		msg, err := d.readExpected()
+		if err != nil {
+			return nil
+		}
+		if _, ok := msg.(*godap.ErrorResponse); ok {
+			return nil
+		}
+		resp, ok := msg.(*godap.VariablesResponse)
+		if !ok {
+			continue
+		}
+		if !resp.Success {
+			return nil
+		}
+
+		var results []InspectResult
+		for _, v := range resp.Body.Variables {
+			if *nodeCount >= maxNodes {
+				break
+			}
+			if filterVar != nil && filterVar(v.Name) {
+				continue
+			}
+			*nodeCount++
+			child := InspectResult{
+				Name:  v.Name,
+				Type:  v.Type,
+				Value: truncateString(v.Value, maxStringLen),
+			}
+			if v.VariablesReference > 0 {
+				child.Children = expandVariable(d, v.VariablesReference, depth+1, maxDepth, nodeCount, maxNodes)
+			}
+			results = append(results, child)
+		}
+		return results
+	}
 }
 
 // errorMessage extracts a human-readable message from an ErrorResponse.
