@@ -46,6 +46,7 @@ For all commands and flags: `dap --help` or `dap <cmd> --help`.
 Choose your starting strategy based on what you know:
 
 - **Have a hypothesis** — set a breakpoint where you expect the bug: `dap debug script.py --break script.py:42`
+- **Conditional breakpoint** — only stop when a condition is met: `dap debug script.py --break "script.py:42:x > 5"` (always quote specs with conditions)
 - **Multi-file app** — breakpoints across modules: `--break src/api/routes.py:55 --break src/models/user.py:30`
 - **No hypothesis, small program** — walk from entry: `dap debug script.py --stop-on-entry` (avoid for large projects — startup code is noisy; bisect with breakpoints instead)
 - **Exception, location unknown** — `dap debug script.py --break-on-exception raised` (Python) / `all` (Go/JS)
@@ -108,6 +109,53 @@ observation will confirm or disprove it. No hypothesis yet? Bisect with two brea
 - Exception at line 80? Root cause is upstream — start earlier
 - Uncertain? Bisect: `--break f:20 --break f:60` — wrong state before or after halves the search space
 
+### Managing Breakpoints Mid-Session
+
+You don't need to restart to change breakpoints. Add or remove them on any command:
+
+```bash
+dap continue --break app.py:50              # add breakpoint, then continue
+dap continue --remove-break app.py:20       # remove breakpoint, then continue
+dap step --break app.py:50                  # add breakpoint, then step
+dap context --break app.py:50               # add breakpoint without stepping
+dap continue --break-on-exception raised    # set exception filter, then continue
+```
+
+Or use dedicated breakpoint commands (no stepping, just manage breakpoints):
+
+```bash
+dap break list                              # show all breakpoints and exception filters
+dap break add app.py:42 app.py:60           # add breakpoints
+dap break add --break-on-exception uncaught # add exception filter
+dap break remove app.py:42                  # remove a breakpoint (alias: dap break rm)
+dap break clear                             # remove all breakpoints and filters
+```
+
+This is powerful for narrowing down: as you learn more, add breakpoints deeper in the
+suspect code and remove ones that have served their purpose — all without restarting.
+
+If a breakpoint is on an invalid line or the adapter adjusts it, `dap` warns you in the output.
+
+### Conditional Breakpoints
+
+Stop only when a condition is true — essential for loops, hot paths, and specific input values.
+Syntax: `"file:line:condition"` (always quote to protect spaces and special chars).
+
+```bash
+dap debug app.py --break "app.py:42:i == 100"            # loop iteration
+dap debug app.py --break "app.py:30:user_id == 123"      # specific value
+dap continue --break "app.py:50:len(items) == 0"         # mid-session add
+dap break add "app.py:42:x > threshold"                  # via break command
+```
+
+To update a condition on an existing breakpoint, just set it again — same file:line replaces:
+```bash
+dap break add "app.py:42:x > 10"    # replace previous condition on line 42
+dap break add app.py:42             # remove condition (unconditional)
+```
+
+Removal ignores conditions — `dap break remove app.py:42` removes regardless of condition.
+
 ## Navigating Execution
 
 At each stop, choose how to advance based on what you suspect:
@@ -117,9 +165,12 @@ dap step        # step over — trust this call, advance to next line
 dap step in     # step into — suspect what's inside this function
 dap step out    # step out — you're in the wrong place, return to caller
 dap continue    # jump to next breakpoint
-dap context     # re-inspect current state without stepping (after continue)
+dap context     # re-inspect current state without stepping
 dap output      # drain buffered stdout/stderr without full context
+dap break list  # show all breakpoints and exception filters
 ```
+
+All execution commands accept `--break`, `--remove-break`, and `--break-on-exception` to adjust breakpoints inline.
 
 `step in` crosses file boundaries — execution follows the call into whatever module it lives in. Each stop shows the
 current `file:line` so you always know where you are.
@@ -147,6 +198,9 @@ Hypothesis: result not assigned before return
 New hypothesis: caller passing empty list
 → dap eval "items" --frame 1      → []   ← confirmed
 → dap step out                    → caller at line 10, no guard for empty input
+→ dap continue --break script.py:8 --remove-break script.py:41
+  ← narrowing: add breakpoint at data source, drop the one we're done with
+  Stopped at main():8, items loaded from config as []
 
 Root cause: missing guard. Fix → dap stop.
 ```

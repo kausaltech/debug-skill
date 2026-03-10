@@ -30,7 +30,14 @@ func newE2EEnv(t *testing.T) *e2eEnv {
 		t.Fatalf("build failed: %s\n%s", err, out)
 	}
 
-	socketPath := filepath.Join(t.TempDir(), "test.sock")
+	// Use /tmp for socket to avoid Unix socket path length limit (~104 bytes on macOS).
+	// t.TempDir() paths with long test names can exceed this limit.
+	sockDir, err := os.MkdirTemp("/tmp", "dap-test-*")
+	if err != nil {
+		t.Fatalf("creating socket dir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(sockDir) })
+	socketPath := filepath.Join(sockDir, "test.sock")
 
 	daemon := exec.Command(binary, "__daemon", "--socket", socketPath)
 	daemon.Stdout = os.Stderr
@@ -221,6 +228,285 @@ func TestE2E_DebugPython_Scheduler(t *testing.T) {
 	}
 	if !strings.Contains(out, "OK") {
 		t.Errorf("expected OK, got:\n%s", out)
+	}
+}
+
+// TestE2E_ContinueWithBreakpoint tests adding breakpoints mid-session via continue --break.
+func TestE2E_ContinueWithBreakpoint(t *testing.T) {
+	if err := exec.Command("python3", "-c", "import debugpy").Run(); err != nil {
+		t.Skip("debugpy not installed")
+	}
+
+	env := newE2EEnv(t)
+	scriptPath := filepath.Join(projectRoot(t), "testdata", "python", "simple.py")
+
+	// 1. Debug with breakpoint at line 2 (y = 2)
+	out, err := env.run("debug", scriptPath, "--break", scriptPath+":2")
+	if err != nil {
+		t.Fatalf("debug failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Stopped: breakpoint") {
+		t.Errorf("expected breakpoint stop at line 2, got:\n%s", out)
+	}
+
+	// 2. Continue with a new breakpoint at line 4 (print)
+	out, err = env.run("continue", "--break", scriptPath+":4")
+	if err != nil {
+		t.Fatalf("continue --break failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Stopped: breakpoint") {
+		t.Errorf("expected breakpoint stop at line 4, got:\n%s", out)
+	}
+	if !strings.Contains(out, ":4") {
+		t.Errorf("expected stop at line 4, got:\n%s", out)
+	}
+
+	// 3. Continue to end — line 2 breakpoint is still set but program already
+	// passed it, so no more stops ahead.
+	out, err = env.run("continue")
+	if err != nil {
+		t.Fatalf("continue failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "terminated") || !strings.Contains(out, "Program terminated") {
+		t.Errorf("expected terminated, got:\n%s", out)
+	}
+
+	// 4. Stop
+	out, err = env.run("stop")
+	if err != nil {
+		t.Fatalf("stop failed: %v\n%s", err, out)
+	}
+}
+
+// TestE2E_ContinueRemoveBreakpoint tests removing breakpoints mid-session via continue --remove-break.
+func TestE2E_ContinueRemoveBreakpoint(t *testing.T) {
+	if err := exec.Command("python3", "-c", "import debugpy").Run(); err != nil {
+		t.Skip("debugpy not installed")
+	}
+
+	env := newE2EEnv(t)
+	scriptPath := filepath.Join(projectRoot(t), "testdata", "python", "simple.py")
+
+	// 1. Debug with breakpoints at lines 2 and 4
+	out, err := env.run("debug", scriptPath, "--break", scriptPath+":2", "--break", scriptPath+":4")
+	if err != nil {
+		t.Fatalf("debug failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Stopped: breakpoint") {
+		t.Errorf("expected breakpoint stop, got:\n%s", out)
+	}
+
+	// 2. Continue but remove the breakpoint at line 4 — should run to end
+	out, err = env.run("continue", "--remove-break", scriptPath+":4")
+	if err != nil {
+		t.Fatalf("continue --remove-break failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "terminated") || !strings.Contains(out, "Program terminated") {
+		t.Errorf("expected terminated (bp at line 4 was removed), got:\n%s", out)
+	}
+
+	// 3. Stop
+	out, err = env.run("stop")
+	if err != nil {
+		t.Fatalf("stop failed: %v\n%s", err, out)
+	}
+}
+
+// TestE2E_StepWithBreakpoint tests adding breakpoints mid-session via step --break.
+func TestE2E_StepWithBreakpoint(t *testing.T) {
+	if err := exec.Command("python3", "-c", "import debugpy").Run(); err != nil {
+		t.Skip("debugpy not installed")
+	}
+
+	env := newE2EEnv(t)
+	scriptPath := filepath.Join(projectRoot(t), "testdata", "python", "simple.py")
+
+	// 1. Debug with stop-on-entry
+	out, err := env.run("debug", scriptPath, "--stop-on-entry")
+	if err != nil {
+		t.Fatalf("debug failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Stopped:") {
+		t.Errorf("expected stopped, got:\n%s", out)
+	}
+
+	// 2. Step with --break at line 4 — breakpoint should be set
+	out, err = env.run("step", "--break", scriptPath+":4")
+	if err != nil {
+		t.Fatalf("step --break failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Stopped: step") {
+		t.Errorf("expected step stop, got:\n%s", out)
+	}
+
+	// 3. Continue — should hit the breakpoint at line 4
+	out, err = env.run("continue")
+	if err != nil {
+		t.Fatalf("continue failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Stopped: breakpoint") {
+		t.Errorf("expected breakpoint stop at line 4, got:\n%s", out)
+	}
+	if !strings.Contains(out, ":4") {
+		t.Errorf("expected stop at line 4, got:\n%s", out)
+	}
+
+	// 4. Stop
+	out, err = env.run("stop")
+	if err != nil {
+		t.Fatalf("stop failed: %v\n%s", err, out)
+	}
+}
+
+// TestE2E_BreakCommand tests dap break list/add/remove/clear.
+func TestE2E_BreakCommand(t *testing.T) {
+	if err := exec.Command("python3", "-c", "import debugpy").Run(); err != nil {
+		t.Skip("debugpy not installed")
+	}
+
+	env := newE2EEnv(t)
+	scriptPath := filepath.Join(projectRoot(t), "testdata", "python", "simple.py")
+
+	// 1. Debug with breakpoint at line 2
+	out, err := env.run("debug", scriptPath, "--break", scriptPath+":2")
+	if err != nil {
+		t.Fatalf("debug failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Stopped: breakpoint") {
+		t.Errorf("expected breakpoint stop, got:\n%s", out)
+	}
+
+	// 2. break list — should show line 2
+	out, err = env.run("break", "list")
+	if err != nil {
+		t.Fatalf("break list failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, ":2") {
+		t.Errorf("expected :2 in break list, got:\n%s", out)
+	}
+
+	// 3. break add line 4
+	out, err = env.run("break", "add", scriptPath+":4")
+	if err != nil {
+		t.Fatalf("break add failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "OK") {
+		t.Errorf("expected OK, got:\n%s", out)
+	}
+
+	// 4. break list — should show both
+	out, err = env.run("break", "list")
+	if err != nil {
+		t.Fatalf("break list failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, ":2") || !strings.Contains(out, ":4") {
+		t.Errorf("expected both :2 and :4 in break list, got:\n%s", out)
+	}
+
+	// 5. break remove line 2
+	out, err = env.run("break", "remove", scriptPath+":2")
+	if err != nil {
+		t.Fatalf("break remove failed: %v\n%s", err, out)
+	}
+
+	// 6. break list — should only show line 4
+	out, err = env.run("break", "list")
+	if err != nil {
+		t.Fatalf("break list failed: %v\n%s", err, out)
+	}
+	if strings.Contains(out, ":2") {
+		t.Errorf("line 2 should be removed, got:\n%s", out)
+	}
+	if !strings.Contains(out, ":4") {
+		t.Errorf("expected :4 in break list, got:\n%s", out)
+	}
+
+	// 7. Continue — should hit line 4
+	out, err = env.run("continue")
+	if err != nil {
+		t.Fatalf("continue failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Stopped: breakpoint") {
+		t.Errorf("expected breakpoint stop at line 4, got:\n%s", out)
+	}
+
+	// 8. break clear
+	out, err = env.run("break", "clear")
+	if err != nil {
+		t.Fatalf("break clear failed: %v\n%s", err, out)
+	}
+
+	// 9. break list — should be empty
+	out, err = env.run("break", "list")
+	if err != nil {
+		t.Fatalf("break list failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "(none)") {
+		t.Errorf("expected (none) after clear, got:\n%s", out)
+	}
+
+	// 10. Continue — should run to end (no breakpoints)
+	out, err = env.run("continue")
+	if err != nil {
+		t.Fatalf("continue failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "terminated") || !strings.Contains(out, "Program terminated") {
+		t.Errorf("expected terminated, got:\n%s", out)
+	}
+
+	// 11. Stop
+	out, err = env.run("stop")
+	if err != nil {
+		t.Fatalf("stop failed: %v\n%s", err, out)
+	}
+}
+
+// TestE2E_ConditionalBreakpoint tests conditional breakpoints with Python/debugpy.
+func TestE2E_ConditionalBreakpoint(t *testing.T) {
+	if err := exec.Command("python3", "-c", "import debugpy").Run(); err != nil {
+		t.Skip("debugpy not installed")
+	}
+
+	env := newE2EEnv(t)
+	scriptPath := filepath.Join(projectRoot(t), "testdata", "python", "loop.py")
+
+	// 1. Debug with conditional breakpoint: stop only when i == 3
+	out, err := env.run("debug", scriptPath, "--break", scriptPath+":3:i == 3")
+	if err != nil {
+		t.Fatalf("debug failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Stopped: breakpoint") {
+		t.Errorf("expected breakpoint stop, got:\n%s", out)
+	}
+	if !strings.Contains(out, "i (int) = 3") {
+		t.Errorf("expected i=3 in locals (conditional breakpoint), got:\n%s", out)
+	}
+
+	// 2. break list — should show condition
+	out, err = env.run("break", "list")
+	if err != nil {
+		t.Fatalf("break list failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "i == 3") {
+		t.Errorf("expected condition in break list, got:\n%s", out)
+	}
+
+	// 3. Continue — condition won't match again (i goes 4 then loop ends), should terminate
+	out, err = env.run("continue")
+	if err != nil {
+		t.Fatalf("continue failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Program terminated") {
+		t.Errorf("expected terminated, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Total: 10") {
+		t.Errorf("expected program output 'Total: 10', got:\n%s", out)
+	}
+
+	// 4. Stop
+	out, err = env.run("stop")
+	if err != nil {
+		t.Fatalf("stop failed: %v\n%s", err, out)
 	}
 }
 
@@ -674,6 +960,44 @@ func TestE2E_IdleTimeout(t *testing.T) {
 	}
 
 	_ = daemon.Wait() // reap
+}
+
+// TestE2E_BreakpointVerification tests that unverified breakpoints produce warnings.
+func TestE2E_BreakpointVerification(t *testing.T) {
+	if err := exec.Command("python3", "-c", "import debugpy").Run(); err != nil {
+		t.Skip("debugpy not installed")
+	}
+
+	env := newE2EEnv(t)
+	scriptPath := filepath.Join(projectRoot(t), "testdata", "python", "simple.py")
+
+	// Debug with breakpoint at line 999 (doesn't exist) + valid breakpoint at line 2
+	out, err := env.run("debug", scriptPath, "--break", scriptPath+":999", "--break", scriptPath+":2")
+	if err != nil {
+		t.Fatalf("debug failed: %v\n%s", err, out)
+	}
+
+	// Should still stop at the valid breakpoint
+	if !strings.Contains(out, "Stopped: breakpoint") {
+		t.Errorf("expected breakpoint stop, got:\n%s", out)
+	}
+
+	// Should contain a warning about the adjusted breakpoint (line 999 → last valid line)
+	if !strings.Contains(out, "Warnings:") {
+		t.Errorf("expected Warnings section for line 999, got:\n%s", out)
+	}
+	if !strings.Contains(out, "999") {
+		t.Errorf("expected warning mentioning line 999, got:\n%s", out)
+	}
+	if !strings.Contains(out, "adjusted") {
+		t.Errorf("expected 'adjusted' in warning, got:\n%s", out)
+	}
+
+	// Stop
+	out, err = env.run("stop")
+	if err != nil {
+		t.Fatalf("stop failed: %v\n%s", err, out)
+	}
 }
 
 // --- Helpers ---

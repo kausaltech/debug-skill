@@ -97,7 +97,7 @@ Implementations:
 
 ### Phase 4: Future
 
-18. `dap break add/remove/list` — runtime breakpoint management
+18. `dap break add/remove/list/clear` — runtime breakpoint management ✅
 19. `dap set` — variable modification
 20. `dap pause` — halt running program
 21. `dap restart` — restart debug session

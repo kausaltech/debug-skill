@@ -14,6 +14,27 @@ func FormatText(r *ContextResult) string {
 
 	var b strings.Builder
 
+	// Break list result (special case)
+	if r.IsBreakList {
+		if len(r.Breakpoints) > 0 {
+			b.WriteString("Breakpoints:\n")
+			for _, bp := range r.Breakpoints {
+				fmt.Fprintf(&b, "  %s\n", bp.String())
+			}
+		} else {
+			b.WriteString("Breakpoints: (none)\n")
+		}
+		if len(r.ExceptionFilters) > 0 {
+			b.WriteString("\nException filters:\n")
+			for _, f := range r.ExceptionFilters {
+				fmt.Fprintf(&b, "  %s\n", f)
+			}
+		} else {
+			b.WriteString("\nException filters: (none)\n")
+		}
+		return b.String()
+	}
+
 	// Eval result (special case)
 	if r.EvalResult != nil {
 		if r.EvalResult.Type != "" {
@@ -83,6 +104,14 @@ func FormatText(r *ContextResult) string {
 		}
 	}
 
+	// Warnings
+	if len(r.Warnings) > 0 {
+		b.WriteString("\nWarnings:\n")
+		for _, w := range r.Warnings {
+			fmt.Fprintf(&b, "  ⚠ %s\n", w)
+		}
+	}
+
 	return b.String()
 }
 
@@ -111,6 +140,12 @@ func FormatResponse(resp *Response, jsonOutput bool) string {
 				b.WriteString("Output:\n")
 				for _, line := range strings.Split(strings.TrimRight(resp.Data.Output, "\n"), "\n") {
 					fmt.Fprintf(&b, "  %s\n", line)
+				}
+			}
+			if len(resp.Data.Warnings) > 0 {
+				b.WriteString("\nWarnings:\n")
+				for _, w := range resp.Data.Warnings {
+					fmt.Fprintf(&b, "  ⚠ %s\n", w)
 				}
 			}
 		}
