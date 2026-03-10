@@ -20,7 +20,8 @@
 
 ---
 
-AI coding agents (Claude Code, Codex, Opencode, Cursor) are stuck with `print` statements and guesswork. **debug-skill** gives them what human developers have: a real debugger they can actually use. It ships two things:
+AI coding agents (Claude Code, Codex, Opencode, Cursor) are stuck with `print` statements and guesswork. **debug-skill**
+gives them what human developers have: a real debugger they can actually use. It ships two things:
 
 - **A Claude Code skill** — teaches Claude *how* to debug: when to set breakpoints, how to step through code, how to
   inspect state
@@ -55,7 +56,8 @@ Via the plugin marketplace — no manual setup needed:
 
 ### Install for other agents
 
-Via [skills.sh](https://skills.sh) — works with Cursor, GitHub Copilot, Windsurf, Cline, and [20+ more agents](https://skills.sh/docs):
+Via [skills.sh](https://skills.sh) — works with Cursor, GitHub Copilot, Windsurf, Cline,
+and [20+ more agents](https://skills.sh/docs):
 
 ```bash
 npx skills add AlmogBaku/debug-skill
@@ -93,16 +95,15 @@ Or download a pre-built binary from the [releases page](https://github.com/Almog
 ### Quick Start
 
 ```bash
-# Set a breakpoint and start — stops automatically, returns full context
-dap debug app.py --break app.py:42
-
-# Inspect and step
-dap eval "len(items)"
-dap step
-
-# Resume or stop
-dap continue
-dap stop
+dap debug app.py --break app.py:42   # start, stop at breakpoint
+dap eval "len(items)"                # inspect a value
+dap inspect data --depth 2           # expand nested objects
+dap step                             # step over
+dap continue                         # next breakpoint
+dap continue --to app.py:50          # run to specific line
+dap pause                            # interrupt if hanging
+dap restart                          # re-run with same args
+dap stop                             # end session
 ```
 
 Every command returns **full context automatically**: current location, surrounding source, local variables, call stack,
@@ -126,24 +127,33 @@ dap debug hello.rs --break hello.rs:4
 # Attach to a remote debugger (e.g. debugpy in a container)
 dap debug --attach container:5678 --backend debugpy --break handler.py:20
 
+# Attach to a running process by PID
+dap debug --pid 12345 --backend debugpy
+
 # Pass arguments to the program
 dap debug app.py --break app.py:10 -- --config prod.yaml --verbose
 ```
 
 ### Commands
 
-| Command                       | Description                                     |
-|-------------------------------|-------------------------------------------------|
-| `dap debug <script>`          | Start debugging (local or `--attach host:port`) |
-| `dap stop`                    | End session                                     |
-| `dap step [in\|out\|over]`    | Step (default: over)                            |
-| `dap continue`                | Resume execution                                |
-| `dap context [--frame N]`     | Re-fetch current state                          |
-| `dap eval <expr> [--frame N]` | Evaluate expression in current frame            |
-| `dap output`                  | Drain buffered stdout/stderr since last stop    |
+| Command                              | Description                                                    |
+|--------------------------------------|----------------------------------------------------------------|
+| `dap debug <script>`                 | Start debugging (local or `--attach host:port` or `--pid PID`) |
+| `dap stop`                           | End session                                                    |
+| `dap step [in\|out\|over]`           | Step (default: over)                                           |
+| `dap continue`                       | Resume execution (`--to file:line` for temp breakpoint)        |
+| `dap context [--frame N]`            | Re-fetch current state                                         |
+| `dap eval <expr> [--frame N]`        | Evaluate expression in current frame                           |
+| `dap inspect <var> [--depth N]`      | Inspect variable (expand nested objects)                       |
+| `dap output`                         | Drain buffered stdout/stderr since last stop                   |
+| `dap pause`                          | Pause a running program                                        |
+| `dap restart`                        | Restart session with same arguments                            |
+| `dap threads`                        | List all threads                                               |
+| `dap thread <id>`                    | Switch to a different thread                                   |
+| `dap break list\|add\|remove\|clear` | Manage breakpoints mid-session                                 |
 
 **Global flags:** `--json` (machine-readable output), `--session <name>` (named sessions), `--socket <path>` (custom
-socket path)
+socket path), `--context-lines <int>` (lines of source context)
 
 ### Supported Languages
 
@@ -186,7 +196,9 @@ PRs and issues welcome. See `claudedocs/` for architecture details and `CLAUDE.m
 
 ## Support the Project
 
-If debug-skill saves you from a painful debugging session, consider [starring the repo](https://github.com/AlmogBaku/debug-skill/stargazers) — it helps others find it and keeps the project going.
+If debug-skill saves you from a painful debugging session,
+consider [starring the repo](https://github.com/AlmogBaku/debug-skill/stargazers) — it helps others find it and keeps
+the project going.
 
 ## License
 
