@@ -72,8 +72,13 @@ Sockets live at ~/.dap-cli/<session>.sock.
 Typical workflow:
   dap debug app.py --break app.py:42   # start, stop at breakpoint → auto-context
   dap eval "my_var"                    # inspect a value mid-session
+  dap inspect data --depth 2           # expand nested objects recursively
   dap step                             # step over → auto-context
   dap continue                         # run to next breakpoint → auto-context
+  dap continue --to app.py:50          # run to a specific line (temp breakpoint)
+  dap pause                            # interrupt a running program
+  dap threads                          # list all threads
+  dap restart                          # restart session with same arguments
   dap stop                             # kill session
 
 Best practices:
@@ -92,7 +97,7 @@ Best practices:
 	root.PersistentFlags().BoolVar(&globalFlags.jsonOutput, "json", false, "Output in JSON format")
 	root.PersistentFlags().StringVar(&globalFlags.socketPath, "socket", "", "Daemon socket path (overrides --session)")
 	root.PersistentFlags().StringVar(&globalFlags.session, "session", "default", "Session name (each session runs an independent daemon)")
-	root.PersistentFlags().IntVar(&globalFlags.contextLines, "context-lines", 0, "Number of source lines before/after current line (default: 2)")
+	root.PersistentFlags().IntVar(&globalFlags.contextLines, "context-lines", 0, "Number of source lines before/after current line (0 = default of 2)")
 
 	// Compute effective socket path: --socket overrides --session
 	root.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
@@ -197,7 +202,8 @@ Blocks until the program hits a breakpoint or exits, then returns auto-context.`
   dap debug server.js --break server.js:15
   dap debug hello.rs --stop-on-entry
   dap debug app.py -- --config prod.yaml --verbose
-  dap debug --attach localhost:5678 --backend debugpy --break handler.py:15`,
+  dap debug --attach localhost:5678 --backend debugpy --break handler.py:15
+  dap debug --pid 12345 --backend debugpy   # attach to running process`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 && attach == "" && pid == 0 {
@@ -381,15 +387,15 @@ func newPauseCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "pause",
 		Short: "Pause a running program",
-		Long: `Pause a running program. Blocks until the program stops, then returns auto-context.
-Useful when the program is running (e.g. after 'continue' from another session).
+		Long: `Pause a running program. Sends a pause request and returns immediately.
+The blocking command (continue/step/debug) that started execution will receive
+the stop event and return auto-context.
 
 Optionally update breakpoints before pausing (same flags as 'continue').`,
 		Example: `  dap pause
   dap pause --break app.py:42   # add breakpoint, then pause`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runDaemonCommand("pause", PauseArgs{
-				ContextLines:      globalFlags.contextLines,
 				BreakpointUpdates: breakpointUpdatesFromFlags(breaks, removeBreaks, exceptionFilters),
 			})
 		},
@@ -472,6 +478,7 @@ func newInspectCmd() *cobra.Command {
 		Use:   "inspect <variable>",
 		Short: "Inspect a variable (expand nested objects)",
 		Long: `Inspect a variable by name, recursively expanding nested objects.
+Searches local variables first, then all scopes (globals, etc.).
 Use --depth to control expansion depth (default 1, max 5).
 Use --frame to inspect in a parent stack frame.`,
 		Example: `  dap inspect data

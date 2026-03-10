@@ -140,7 +140,6 @@ type StepArgs struct {
 
 // PauseArgs are arguments for the "pause" command.
 type PauseArgs struct {
-	ContextLines int `json:"context_lines,omitempty"`
 	BreakpointUpdates
 }
 

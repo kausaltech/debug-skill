@@ -72,12 +72,16 @@ type Daemon struct {
 
 	// Adapter address and config for child session creation (js-debug multi-session)
 	adapterAddr string
-	// sessionBreaks and sessionExceptionFilters are only accessed from handler methods
-	// (single-threaded dispatch via Serve) — no mutex needed.
-	// d.client is guarded by clientMu for pointer swaps (readLoop↔handlers); once
-	// requireSession passes, handlers use d.client directly (sequential dispatch).
+	// sessionBreaks and sessionExceptionFilters are accessed from handler methods
+	// serialized by cmdMu. Interrupt commands (pause, stop) don't modify them.
+	// d.client is guarded by clientMu for pointer swaps (readLoop↔handlers).
 	sessionBreaks           []Breakpoint // stored breakpoints for child session re-init
 	sessionExceptionFilters []string     // stored exception filter IDs for child session re-init
+
+	// Command serialization: most commands hold cmdMu for their duration.
+	// Interrupt commands (pause, stop) skip it so they can run while a
+	// blocking command (continue/step/debug) is in progress.
+	cmdMu sync.Mutex
 
 	// Socket
 	listener   net.Listener
@@ -407,10 +411,14 @@ func (d *Daemon) Serve(socketPath string) error {
 			if d.listener == nil {
 				return nil // shut down
 			}
+			// Closed listener during cleanup — exit silently
+			if strings.Contains(err.Error(), "use of closed") {
+				return nil
+			}
 			log.Printf("accept error: %v", err)
 			continue
 		}
-		d.handleConnection(conn)
+		go d.handleConnection(conn)
 	}
 }
 
@@ -434,6 +442,17 @@ func (d *Daemon) dispatch(req Request) *Response {
 	if d.idleTimer != nil {
 		d.idleTimer.Reset(idleTimeout())
 	}
+
+	// Interrupt commands (pause, stop) run without holding cmdMu so they
+	// can execute while a blocking command (continue/step/debug) is in progress.
+	switch req.Command {
+	case "pause", "stop":
+		// no lock
+	default:
+		d.cmdMu.Lock()
+		defer d.cmdMu.Unlock()
+	}
+
 	resp := d.dispatchCommand(req)
 	if resp.Status != "error" {
 		d.attachWarnings(resp)
@@ -805,7 +824,10 @@ func (d *Daemon) handlePause(rawArgs json.RawMessage) *Response {
 		return errResponsef("pause: %v", err)
 	}
 
-	return d.awaitStopResult(args.ContextLines)
+	// Don't call awaitStopResult here — the already-blocking command
+	// (continue/step/debug) will consume the StoppedEvent and return
+	// the auto-context to its caller.
+	return &Response{Status: "ok"}
 }
 
 func (d *Daemon) handleContext(rawArgs json.RawMessage) *Response {
@@ -1240,9 +1262,9 @@ func (d *Daemon) stopSession() {
 
 func (d *Daemon) cleanup() {
 	d.stopSession()
-	if d.listener != nil {
-		_ = d.listener.Close()
-		d.listener = nil
+	if l := d.listener; l != nil {
+		d.listener = nil // mark closed before Close so accept loop exits immediately
+		_ = l.Close()
 	}
 	_ = os.Remove(d.socketPath)
 	_ = os.Remove(d.socketPath + ".pid")
