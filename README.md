@@ -102,11 +102,11 @@ dap step                             # step over
 dap continue                         # next breakpoint
 dap continue --to app.py:50          # run to specific line
 dap pause                            # interrupt if hanging
-dap restart                          # re-run with same args
+dap restart                          # re-run, preserving breakpoint changes
 dap stop                             # end session
 ```
 
-Every command returns **full context automatically**: current location, surrounding source, local variables, call stack,
+Execution commands (`debug`, `continue`, `step`) return **full context automatically**: current location, surrounding source, local variables, call stack,
 and program output. No follow-up calls needed.
 
 ### Usage Examples
@@ -147,7 +147,7 @@ dap debug app.py --break app.py:10 -- --config prod.yaml --verbose
 | `dap inspect <var> [--depth N]`      | Inspect variable (expand nested objects)                       |
 | `dap output`                         | Drain buffered stdout/stderr since last stop                   |
 | `dap pause`                          | Pause a running program                                        |
-| `dap restart`                        | Restart session with same arguments                            |
+| `dap restart`                        | Restart session, preserving breakpoint changes                 |
 | `dap threads`                        | List all threads                                               |
 | `dap thread <id>`                    | Switch to a different thread                                   |
 | `dap break list\|add\|remove\|clear` | Manage breakpoints mid-session                                 |
