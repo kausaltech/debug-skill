@@ -17,8 +17,7 @@ evaluate arbitrary expressions against the live process — all without restarti
 ## Setup
 
 This skill uses `dap`, a CLI tool that wraps the Debug Adapter Protocol (DAP) and exposes it
-as simple shell commands. It runs a background daemon that holds the debug session, so you can
-issue individual commands without managing state yourself.
+as simple commands.
 
 If `dap` isn't installed (check: `command -v dap`), install it NOW.
 Ask/notify the user before proceeding to install it.
@@ -29,14 +28,12 @@ bash scripts/install-dap.sh
 
 Alternativly, install from sources `go install github.com/AlmogBaku/debug-skill/cmd/dap@latest`
 
-This tool is fully open-source and available on [GitHub](https://github.com/AlmogBaku/debug-skill), it follows best
-practices, is actively maintained, and secured. The user can either install it from binaries (using the installer
-script) or from sources.
+This tool is open-sourced and available on [GitHub](https://github.com/AlmogBaku/debug-skill), maintaind and follows
+best practices.
 
 Supports Natively Python, Go, Node.js/TypeScript, Rust, C/C++, and any other language that supports DAP.
 
-If a backend debugger is missing or fails to start, see `references/installing-debuggers.md` for installation
-instructions.
+If a debugger backend is missing or fails to start, see `references/installing-debuggers.md`
 
 For all commands and flags: `dap --help` or `dap <cmd> --help`.
 
@@ -62,23 +59,17 @@ Tip: You might want to use your session id(${CLAUDE_SESSION_ID}) if available.
 
 Run `dap debug --help` for all flags, backends, and examples.
 
-Not every bug needs a debugger: reach for the debugger you can't determine from the source alone.
-
 ## The Debugging Mindset
 
-Reading source code lets you reason about what *should* happen. A debugger lets you *observe* what *does* happen —
-actual values, actual path, actual state at each moment. When those diverge, you've found your bug. Default to
-observing, not guessing.
-
-You should reach to the debugger when reading the source code alone is not enough to understand the problem. This is a
-mind-shift from the usual "print-based debugging." That means that we fix once we VALIDATED the hypothesis and saw
-evidence to our theory.
+Not every bug needs a debugger — reach for it when reading source alone can't explain the behavior.
+A debugger lets you *observe* what *does* happen: actual values, actual path, actual state.
+When that diverges from what *should* happen, you've found your bug.
 
 **Two strikes, rethink.** If two hypotheses fail at the same location, your mental model is wrong.
 Re-read the code, form a *completely different* theory with different breakpoints.
 
-**Escalate gradually.** Start with `dap eval` to test a quick hypothesis. Use conditional breakpoints to filter noise.
-Fall back to full breakpoints + stepping only when you need interactive control.
+**Escalate gradually.** Start with `dap eval` to test a quick hypothesis. Use conditional breakpoints
+to filter noise. Fall back to full breakpoints + stepping only when you need interactive control.
 
 ## Know Your State
 
@@ -159,19 +150,6 @@ dap debug app.py --break "app.py:30:user_id == 123"      # reproduce a user-spec
 dap continue --break "app.py:50:len(items) == 0"         # catch the empty-list case mid-session
 ```
 
-### Bisecting Loops
-
-A loop goes wrong at an unknown iteration. Binary search it:
-
-```
-dap debug app.py --break "app.py:45:i == 500"   # midpoint of 1000
-→ dap eval "is_valid(result)"                    # True → bug is after 500
-→ dap break add "app.py:45:i == 750"             # update the condition
-→ dap restart                                    # restart preserving new breakpoint
-```
-
-~10 iterations to find the bug in 1000. Not 1000 step commands.
-
 ### Invariant Breakpoints
 
 Conditional breakpoints as runtime assertions — stop the *moment* something goes wrong:
@@ -216,47 +194,16 @@ dap eval "self.config" --frame 1    # frame 1 = caller (may be a different file)
 Avoid eval expressions that call methods with side effects — they mutate program state and can corrupt your debugging
 session. Stick to read-only access unless you're intentionally testing a fix.
 
-## When the Program Hangs
-
-When a program runs but never returns, that *is* information — something is stuck. Don't guess; interrupt
-and observe.
-
-```
-Bug: program hangs (infinite loop or deadlock)
-
-→ dap pause                         ← interrupt wherever it is (returns OK immediately)
-  [the already-blocking debug/continue/step call returns auto-context: location + locals]
-  Stopped at process() · worker.py:55, locals: i=99999
-→ dap threads                       ← are other threads blocked too?
-→ dap eval "lock.locked()"          ← test deadlock hypothesis
-Root cause: lock never released. Fix → dap stop.
-```
-
-Check: is it one thread stuck (infinite loop, blocking I/O), or are multiple threads waiting on each
-other (deadlock)? The location where `pause` stops is your first clue.
-
-## Digging Into Complex State
-
-When a variable is opaque or deeply nested, expand it: `dap inspect data --depth 2`.
-
 ## Skipping Ahead
 
 When you need a quick look at a specific line without committing to a permanent breakpoint, use
 `dap continue --to file:line`. It's a disposable breakpoint — stops once, then vanishes. Good for
 "I just want to see what `x` looks like at line 50" without managing breakpoint lifecycle.
 
-## Concurrency Bugs
+## Advanced Scenarios
 
-If state is wrong but the code path looks correct, consider: is another thread modifying state
-concurrently?
-
-**First move at any concurrent crash or hang:** run `dap threads`, then inspect every thread's stack with
-`dap thread <id>` — the thread causing the problem is often not the one currently stopped.
-
-- **Deadlock pattern**: two or more threads each waiting for a resource the other holds. Check thread
-  states to confirm.
-- **Race condition**: unexpected values that change between stops. Look for shared mutable state
-  accessed without synchronization.
+For advanced scenarios — hangs, concurrency bugs, deeply nested state, loop bisection —
+see `${CLAUDE_SKILL_DIR}/references/advanced-techniques.md`.
 
 ## Walkthrough
 
