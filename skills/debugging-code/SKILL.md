@@ -22,11 +22,20 @@ the debugger state, so you can simply interact with it with multiple calls.
 If `dap` isn't installed (check: `command -v dap`), install it NOW.
 Ask/notify the user before proceeding to install it.
 
+From Homebrew (macOS)
+```bash
+brew install AlmogBaku/tap/dap
+```
+
+Installer script:
 ```bash
 bash scripts/install-dap.sh
 ```
 
-Alternatively, install from sources `go install github.com/AlmogBaku/debug-skill/cmd/dap@latest`
+Install from sources:
+```bash
+go install github.com/AlmogBaku/debug-skill/cmd/dap@latest
+```
 
 This tool is open-sourced and available on [GitHub](https://github.com/AlmogBaku/debug-skill), maintained and follows
 best practices.
