@@ -75,6 +75,7 @@ CLI sends one command and gets back the full context — no interactive terminal
 
 ### Install
 
+
 ```bash
 # One-liner (Linux & macOS)
 bash <(curl -fsSL https://raw.githubusercontent.com/AlmogBaku/debug-skill/master/skills/debugging-code/scripts/install-dap.sh)
@@ -83,6 +84,12 @@ bash <(curl -fsSL https://raw.githubusercontent.com/AlmogBaku/debug-skill/master
 <details>
 <summary>Other install methods</summary>
 
+**From Homebrew (for macOS):**
+```bash
+brew install AlmogBaku/tap/dap
+```
+
+**From sources:**
 ```bash
 # Go install
 go install github.com/AlmogBaku/debug-skill/cmd/dap@latest
