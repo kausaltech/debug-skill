@@ -1268,8 +1268,18 @@ func (d *Daemon) stopSession() {
 		c.Close()
 	}
 	if d.adapterCmd != nil && d.adapterCmd.Process != nil {
-		_ = d.adapterCmd.Process.Kill()
-		_ = d.adapterCmd.Wait()
+		// Give the adapter time to shut down gracefully before hard-killing
+		done := make(chan struct{})
+		go func() {
+			_ = d.adapterCmd.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			_ = d.adapterCmd.Process.Kill()
+			<-done
+		}
 		d.adapterCmd = nil
 	}
 	if d.cleanupFn != nil {

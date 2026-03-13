@@ -3,8 +3,10 @@ package dap
 import (
 	"encoding/json"
 	"fmt"
+	"os/exec"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestOutputBufferBoundedAtWrite(t *testing.T) {
@@ -85,6 +87,50 @@ func TestTempBinaryCleanup_NilSafe(t *testing.T) {
 	// Verify stopSession with nil cleanupFn doesn't panic
 	d := &Daemon{}
 	d.stopSession() // should not panic
+}
+
+func TestStopSessionGracefulShutdown(t *testing.T) {
+	// Process that exits quickly on its own — should not need SIGKILL
+	cmd := exec.Command("sleep", "0")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{adapterCmd: cmd}
+
+	start := time.Now()
+	d.stopSession()
+	elapsed := time.Since(start)
+
+	if elapsed > 2*time.Second {
+		t.Errorf("graceful shutdown took too long: %v (expected < 2s)", elapsed)
+	}
+	if d.adapterCmd != nil {
+		t.Error("adapterCmd should be nil after stopSession")
+	}
+}
+
+func TestStopSessionKillsHangingProcess(t *testing.T) {
+	// Process that ignores signals and hangs — should be killed after timeout
+	cmd := exec.Command("sleep", "60")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	d := &Daemon{adapterCmd: cmd}
+
+	start := time.Now()
+	d.stopSession()
+	elapsed := time.Since(start)
+
+	// Should take ~3s (the timeout), not 60s
+	if elapsed > 5*time.Second {
+		t.Errorf("expected kill after ~3s, took %v", elapsed)
+	}
+	if elapsed < 2*time.Second {
+		t.Errorf("expected to wait for timeout, but finished in %v", elapsed)
+	}
+	if d.adapterCmd != nil {
+		t.Error("adapterCmd should be nil after stopSession")
+	}
 }
 
 func TestParseBreakpointSpec(t *testing.T) {
